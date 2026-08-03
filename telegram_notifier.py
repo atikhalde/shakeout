@@ -55,8 +55,13 @@ class TelegramNotifier:
     @staticmethod
     def format_signal(sig: dict) -> str:
         s = sig
-        return (
-            "🚨 <b>PATTERN SIGNAL</b> — {sym} "
+        live = bool(s.get("intraday"))
+        header = ("🚨 <b>LIVE PATTERN SIGNAL</b> (market open) — {sym} "
+                  if live else "🚨 <b>PATTERN SIGNAL</b> — {sym} ")
+        note = ("\n⚠️ <i>Intraday signal — the daily candle is still forming; "
+                "confirm by close.</i>" if live else "")
+        msg = (
+            header +
             "<i>(score {score}/100)</i>\n"
             "📅 <b>{date}</b>  Close ₹{close:.2f}\n"
             "🔓 BOS: {bos} ({style}) — broke {brk:.2f}\n"
@@ -74,6 +79,7 @@ class TelegramNotifier:
             ssl=s["ssl"], minc=s["min_close_after_ssl"],
             bounce=s["bounce_pct"], body=s["body_ratio"],
         )
+        return msg + note
 
     @staticmethod
     def format_summary(n_signals: int, scope: str = "NSE universe") -> str:

@@ -80,6 +80,59 @@ def test_telegram_format() -> None:
     check("summary without signals", "No pattern signals" in summary0)
 
 
+def test_intraday() -> None:
+    print("== intraday (live market) logic ==")
+    import datetime as dt
+
+    from dhan_client import DhanClient
+    from scanner import merge_partial
+
+    # ---- merge a partial candle onto daily history ----
+    bars = {
+        "dates": ["2026-07-30"], "open": [200.0], "high": [210.0],
+        "low": [195.0], "close": [201.4], "volume": [2_600_000],
+    }
+    partial = {"open": 220.0, "high": 230.0, "low": 219.0,
+               "close": 225.0, "volume": 800_000}
+    merged, used = merge_partial(bars, partial, "2026-07-31")
+    check("merge appends today", merged["dates"][-1] == "2026-07-31")
+    check("merge sets partial_last", merged.get("partial_last") is True)
+    check("merge OHLC", merged["close"][-1] == 225.0 and merged["high"][-1] == 230.0)
+
+    bars2 = {"dates": ["2026-07-31"], "open": [200.0], "high": [210.0],
+             "low": [195.0], "close": [201.4], "volume": [2_600_000]}
+    m2, used2 = merge_partial(bars2, partial, "2026-07-31")
+    check("no duplicate when today already present",
+          used2 is False and len(m2["dates"]) == 1)
+
+    # ---- intraday payload parsing (list-of-lists format) ----
+    class FakeResp:
+        def __init__(self, payload): self._p = payload
+        def json(self): return self._p
+
+    client = DhanClient("fake", min_interval=0.0)
+    client._get = lambda path, params: FakeResp([
+        [1750000000000, 100.0, 105.0, 99.0, 102.0, 1000],
+        [1750000060000, 102.0, 106.0, 100.0, 104.0, 1200],
+    ])
+    rows = client.get_intraday("TEST", dt.date(2026, 7, 31))
+    check("intraday rows parsed", rows is not None and len(rows) == 2)
+    check("intraday row ohlc", rows[1]["high"] == 106.0 and rows[1]["close"] == 104.0)
+
+    client._get = lambda path, params: FakeResp([
+        [1750000000000, 100.0, 105.0, 99.0, 102.0, 1000],
+        [1750000060000, 102.0, 106.0, 100.0, 104.0, 1200],
+    ])
+    p = client.intraday_partial("TEST", dt.date(2026, 7, 31))
+    check("partial aggregated", p is not None and p["open"] == 100.0
+          and p["high"] == 106.0 and p["low"] == 99.0
+          and p["close"] == 104.0 and p["volume"] == 2200)
+
+    client._get = lambda path, params: FakeResp([])
+    p2 = client.intraday_partial("TEST", dt.date(2026, 8, 1))
+    check("no data -> None", p2 is None)
+
+
 def test_negatives() -> None:
     print("== negative cases (must NOT flag) ==")
     cfg = ScanConfig()
@@ -110,6 +163,7 @@ def main() -> int:
     global PASS, FAIL
     test_indicators()
     test_telegram_format()
+    test_intraday()
     test_positives()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")

@@ -127,6 +127,80 @@ class DhanClient:
         self._write_cache(cache_file, bars)
         return self._slice(bars, from_date, to_date)
 
+    # ------------------------------------------------------------- intraday
+    def get_intraday(self, symbol: str, date: dt.date,
+                     interval_minutes: int = 15) -> Optional[list]:
+        """
+        Intraday candles for `symbol` on `date` via Dhan /v2/charts/intraday.
+        Returns a list of dicts {ts, open, high, low, close, volume}
+        (oldest -> newest) or None if no data / error.
+        """
+        r = self._get("/v2/charts/intraday", {
+            "symbol": symbol,
+            "exchangeSegment": "NSE_EQ",
+            "instrumentType": "1",
+            "interval": str(interval_minutes),
+            "fromDate": date.isoformat(),
+            "toDate": date.isoformat(),
+        })
+        try:
+            data = r.json()
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(data, dict):
+            data = data.get("data", data)
+
+        rows = []
+        if isinstance(data, list):
+            for row in data:
+                try:
+                    if isinstance(row, dict):
+                        ts = row.get("timestamp") or row.get("date") or row.get("time")
+                        rows.append({
+                            "ts": str(ts),
+                            "open": float(row["open"]),
+                            "high": float(row["high"]),
+                            "low": float(row["low"]),
+                            "close": float(row["close"]),
+                            "volume": float(row.get("volume", 0) or 0),
+                        })
+                    else:
+                        # Dhan often returns [timestamp, open, high, low, close, volume]
+                        if len(row) < 5:
+                            continue
+                        rows.append({
+                            "ts": str(row[0]),
+                            "open": float(row[1]),
+                            "high": float(row[2]),
+                            "low": float(row[3]),
+                            "close": float(row[4]),
+                            "volume": float(row[5]) if len(row) > 5 else 0.0,
+                        })
+                except (TypeError, ValueError, IndexError):
+                    continue
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r["ts"])
+        return rows
+
+    def intraday_partial(self, symbol: str, date: dt.date,
+                         interval_minutes: int = 15) -> Optional[dict]:
+        """
+        Aggregate today's intraday candles (so far) into ONE partial daily
+        candle: {open, high, low, close, volume}.
+        Returns None if the market has no data for that date yet.
+        """
+        rows = self.get_intraday(symbol, date, interval_minutes)
+        if not rows:
+            return None
+        return {
+            "open": rows[0]["open"],
+            "high": max(r["high"] for r in rows),
+            "low": min(r["low"] for r in rows),
+            "close": rows[-1]["close"],
+            "volume": sum(r["volume"] for r in rows),
+        }
+
     # ------------------------------------------------------------- parsing
     def _parse_ohlc(self, r: requests.Response) -> Optional[dict]:
         """Tolerant parser: Dhan may return columnar JSON or a row list."""

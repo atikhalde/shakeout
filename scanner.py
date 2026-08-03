@@ -101,6 +101,33 @@ def _write_csv(rows: list[dict], path: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# intraday (live market) helpers
+# --------------------------------------------------------------------------
+
+def merge_partial(bars: dict, partial: dict, today: str):
+    """
+    Append a partial (intraday-so-far) candle to a daily bars dict.
+    Returns (merged_bars, merged_bool).
+    If the daily series already contains `today`, nothing is merged and
+    merged_bool is False (the daily bar is already the live partial bar).
+    The merged bars get 'partial_last': True so the detector knows the
+    last candle is still forming (e.g. for the volume filter).
+    """
+    if bars.get("dates") and bars["dates"][-1] >= today:
+        return bars, False
+    b = {k: list(v) for k, v in bars.items() if isinstance(v, list)}
+    b["dates"] = list(bars["dates"])
+    b["dates"].append(today)
+    b["open"].append(partial["open"])
+    b["high"].append(partial["high"])
+    b["low"].append(partial["low"])
+    b["close"].append(partial["close"])
+    b["volume"].append(partial["volume"])
+    b["partial_last"] = True
+    return b, True
+
+
+# --------------------------------------------------------------------------
 # demo mode
 # --------------------------------------------------------------------------
 
@@ -155,7 +182,7 @@ def run_demo(cfg: ScanConfig, backtest: bool, backtest_days: int,
 
 def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
              watchlist: str | None, from_days: int, force_refresh: bool,
-             debug: bool,
+             debug: bool, intraday: bool = False,
              notifier: TelegramNotifier | None = None) -> list[dict]:
     from dhan_client import DhanClient
 
@@ -183,6 +210,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
 
     to_date = dt.date.today()
     from_date = to_date - dt.timedelta(days=from_days)
+    today_s = to_date.isoformat()
 
     signals, errors = [], 0
     for i, sym in enumerate(symbols, 1):
@@ -196,11 +224,27 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             continue
         if bars is None or len(bars.get("close", [])) < cfg.min_bars:
             continue
+
+        # ---- live market: append today's partial candle from intraday ----
+        live_merged = False
+        if intraday:
+            last_d = bars["dates"][-1] if bars["dates"] else ""
+            if last_d < today_s:
+                try:
+                    partial = client.intraday_partial(sym, to_date)
+                except Exception:  # noqa: BLE001
+                    partial = None
+                if partial:
+                    bars, live_merged = merge_partial(bars, partial, today_s)
+            # if last_d == today_s, Dhan already gave today's forming bar
+
         dates = bars["dates"]
         sig = detect_setup(bars, dates, cfg)
         if sig:
+            sig["intraday"] = bool(live_merged)
             signals.append(sig)
-            print(f"  SIGNAL {sym:12s} score={sig['score']:.0f} "
+            tag = "LIVE " if live_merged else ""
+            print(f"  SIGNAL {tag}{sym:12s} score={sig['score']:.0f} "
                   f"signal={sig['signal_date']} ssl={sig['ssl']:.1f} "
                   f"flush={sig['flush_date']}")
         if i % 50 == 0:
@@ -246,6 +290,10 @@ def main(argv=None) -> int:
                    help="live: how many calendar days of history to fetch")
     p.add_argument("--refresh", action="store_true",
                    help="live: ignore cached daily bars")
+    p.add_argument("--intraday", action="store_true",
+                   help="live: also fetch today's partial candle from Dhan "
+                        "intraday data so signals fire DURING market hours "
+                        "(run this every ~15 min while the market is open)")
     p.add_argument("--debug", action="store_true")
     p.add_argument("--telegram", action="store_true",
                    help="send alerts to Telegram (needs TELEGRAM_BOT_TOKEN "
@@ -283,7 +331,8 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return 2
         rows = run_live(cfg, token, client_id, args.limit, args.watchlist,
-                        args.from_days, args.refresh, args.debug, notifier)
+                        args.from_days, args.refresh, args.debug,
+                        args.intraday, notifier)
 
     if args.out and rows:
         _write_csv(rows, args.out)

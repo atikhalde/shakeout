@@ -157,7 +157,10 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
     # ------------------------------------------------------------- filters
     if c[t] < cfg.min_price:
         return None
-    if avg_volume(v, cfg.volume_lookback) < cfg.min_avg_volume:
+    # for a still-forming (intraday) last candle, measure average volume on
+    # completed bars only (today's partial volume is not comparable yet)
+    vols = v if not bars.get("partial_last") or len(v) < 2 else v[:-1]
+    if avg_volume(vols, cfg.volume_lookback) < cfg.min_avg_volume:
         return None
 
     # ------------------------------------------------------------- assemble

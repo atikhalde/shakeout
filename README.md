@@ -192,6 +192,63 @@ git push
 - View logs any time: Actions → run → "Run live scan + Telegram alerts"
   step console. CSVs are auto-deleted after 30 days.
 
+---
+
+## ⚡ Live market alerts (during trading hours — not after close)
+
+The daily workflow alerts *after* the market closes. To get the alert
+**while the market is open**, use the second workflow: **Intraday Live Scan**
+(`.github/workflows/intraday.yml`).
+
+**How it works:** every 15 minutes during NSE hours (09:15–15:15 IST), the
+scanner fetches today's intraday candles from Dhan, aggregates them into
+**today's partial daily candle**, re-runs the whole pattern on
+(history + partial), and alerts the instant the reversal conditions are met —
+so you get the signal hours before the close, live.
+
+The Telegram message is marked **"🚨 LIVE PATTERN SIGNAL (market open)"** with
+a note that the candle is still forming and to confirm by close. The regular
+16:30 IST run then re-confirms with the final daily candle.
+
+### Option A — GitHub Actions (cloud, no PC needed)
+
+Push `intraday.yml` (included in the zip) and edit **`watchlist.txt`** with
+your symbols (one per line). The workflow:
+
+- runs **09:15 IST kickoff + every 15 min 09:30–15:15 IST** Mon–Fri
+- scans your **watchlist** (fast, ~1–3 min per run)
+- reuses the daily-history cache between runs via `actions/cache`
+- sends every live signal to Telegram
+
+⚠️ **Free-tier minutes warning:** a ~100-symbol watchlist × 26 runs/day ≈
+600–1700 min/month — keep `watchlist.txt` ≤ ~150 symbols. Do **not** run
+full-universe intraday scans in Actions (would exceed the 2000 free minutes).
+
+### Option B — Local machine (unlimited, zero GitHub minutes)
+
+Add this to your crontab (runs every 15 min during market hours):
+
+```bash
+crontab -e
+*/15 9-15 * * 1-5  cd /home/user/pattern_scanner && ./run_intraday.sh >> logs/intraday.log 2>&1
+```
+
+`run_intraday.sh` scans `watchlist.txt` live and alerts Telegram. On a local
+machine you can even run the full universe every 15–30 min:
+
+```bash
+python3 scanner.py --mode live --intraday --telegram                 # whole NSE
+python3 scanner.py --mode live --intraday --watchlist watchlist.txt --telegram
+```
+
+### Testing the live mode
+
+```bash
+# with a real token, during market hours:
+python3 scanner.py --mode live --intraday --watchlist watchlist.txt --telegram --limit 3
+```
+or use the workflow's manual "Run workflow" with **test_only = true**.
+
 ## 📦 GitHub setup
 
 The folder is ready to push as-is:
@@ -265,14 +322,17 @@ pattern_scanner/
 ├── telegram_notifier.py  # Telegram Bot API alerts
 ├── env_loader.py         # tiny .env loader (no deps)
 ├── demo_data.py          # 3 real positives + 7 negatives (reconstructed)
-├── tests.py              # 36 automated checks
-├── run_daily.sh          # local cron script (optional)
+├── tests.py              # 44 automated checks
+├── run_daily.sh          # local cron: end-of-day scan
+├── run_intraday.sh       # local cron: live scan every 15 min
+├── watchlist.txt         # symbols for the intraday scan (edit me)
 ├── requirements.txt
 ├── .env.example          # copy to .env and fill in your tokens
 ├── .gitignore            # keeps .env / cache / logs out of git
 ├── LICENSE               # MIT
 ├── .github/workflows/
-│   └── daily.yml         # cloud daily scan + Telegram alerts (GitHub Actions)
+│   ├── daily.yml         # cloud: end-of-day scan 16:30 IST + Telegram
+│   └── intraday.yml      # cloud: LIVE scan every 15 min during market hours
 └── data/cache/           # live-data cache (created on first live run)
 ```
 

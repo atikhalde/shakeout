@@ -1,0 +1,7 @@
+# Intraday scan watchlist - one NSE symbol per line (uppercase).
+# Keep this <= ~150 symbols if you use the GitHub Actions workflow
+# (stays within the free-tier minutes budget).
+# NOTE: your repo is public, so anything here is public too.
+SPORTKING
+BAJFINANCE
+SPR_AUTO
