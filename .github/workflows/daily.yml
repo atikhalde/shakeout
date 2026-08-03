@@ -47,7 +47,7 @@ jobs:
       - name: Install dependencies
         run: pip install numpy requests
       - name: Run test suite
-        run: python -m pattern_scanner.tests
+        run: python tests.py
 
   # ------------------------------------------------------------------ scan
   scan:
@@ -68,7 +68,7 @@ jobs:
         run: |
           python - <<'EOF'
           import os
-          from pattern_scanner.telegram_notifier import TelegramNotifier
+          from telegram_notifier import TelegramNotifier
           n = TelegramNotifier(os.environ["TELEGRAM_BOT_TOKEN"],
                                os.environ["TELEGRAM_CHAT_ID"])
           ok = n.send("✅ <b>Shakeout scanner</b> is live.\n"
@@ -90,7 +90,7 @@ jobs:
           if [ "${{ inputs.threshold }}" != "" ] && [ "${{ inputs.threshold }}" != "0" ]; then
             ARGS="$ARGS --threshold ${{ inputs.threshold }}"
           fi
-          python -m pattern_scanner.scanner $ARGS
+          python scanner.py $ARGS
 
       # ---- attach the CSV so you can download it from the run page ----
       - name: Upload results
