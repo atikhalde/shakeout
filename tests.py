@@ -12,11 +12,11 @@ import sys
 
 import numpy as np
 
-from .config import ScanConfig
-from .demo_data import demo_universe
-from .indicators import ema, rolling_max
-from .pattern import detect_setup
-from .telegram_notifier import TelegramNotifier
+from config import ScanConfig
+from demo_data import demo_universe
+from indicators import ema, rolling_max
+from pattern import detect_setup
+from telegram_notifier import TelegramNotifier
 
 PASS = 0
 FAIL = 0

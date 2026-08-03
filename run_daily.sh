@@ -12,7 +12,7 @@ cd "$(dirname "$0")"
 mkdir -p logs
 
 echo "=== scan $(date '+%F %T %Z') ==="
-python3 -m pattern_scanner.scanner \
+python3 scanner.py \
     --mode live \
     --telegram \
     --out "logs/signals_$(date +%F).csv"

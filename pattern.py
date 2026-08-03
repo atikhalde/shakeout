@@ -25,8 +25,8 @@ from typing import Optional
 
 import numpy as np
 
-from .config import ScanConfig
-from .indicators import ema, rolling_max, rolling_min, avg_volume
+from config import ScanConfig
+from indicators import ema, rolling_max, rolling_min, avg_volume
 
 
 # --------------------------------------------------------------------------

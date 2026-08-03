@@ -33,10 +33,10 @@ import datetime as dt
 import os
 import sys
 
-from .config import ScanConfig
-from .env_loader import load_env
-from .pattern import detect_setup
-from .telegram_notifier import TelegramNotifier
+from config import ScanConfig
+from env_loader import load_env
+from pattern import detect_setup
+from telegram_notifier import TelegramNotifier
 
 
 def _table_rows(signals: list[dict]) -> list[dict]:
@@ -106,7 +106,7 @@ def _write_csv(rows: list[dict], path: str) -> None:
 
 def run_demo(cfg: ScanConfig, backtest: bool, backtest_days: int,
              notifier: TelegramNotifier | None = None) -> list[dict]:
-    from .demo_data import demo_universe
+    from demo_data import demo_universe
     universe = demo_universe()
 
     if backtest:
@@ -157,7 +157,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
              watchlist: str | None, from_days: int, force_refresh: bool,
              debug: bool,
              notifier: TelegramNotifier | None = None) -> list[dict]:
-    from .dhan_client import DhanClient
+    from dhan_client import DhanClient
 
     client = DhanClient(token, client_id,
                         min_interval=cfg.request_interval,

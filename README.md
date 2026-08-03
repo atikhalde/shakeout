@@ -41,8 +41,8 @@ pip install numpy requests
 ## Quick start — demo mode (no API needed)
 
 ```bash
-python -m pattern_scanner.tests      # 36 checks: 3 positives + 7 negatives
-python -m pattern_scanner.scanner --mode demo
+python tests.py      # 36 checks: 3 positives + 7 negatives
+python scanner.py --mode demo
 ```
 
 Expected output (all three stocks flagged on their exact reversal dates):
@@ -65,13 +65,13 @@ export DHAN_ACCESS_TOKEN=your_token_here
 export DHAN_CLIENT_ID=your_client_id_here     # optional
 
 # scan the whole NSE equity universe (first 300 symbols for a quick test):
-python -m pattern_scanner.scanner --mode live --limit 300
+python scanner.py --mode live --limit 300
 
 # scan only your watchlist (one symbol per line):
-python -m pattern_scanner.scanner --mode live --watchlist watchlist.txt
+python scanner.py --mode live --watchlist watchlist.txt
 
 # save results:
-python -m pattern_scanner.scanner --mode live --out signals.csv
+python scanner.py --mode live --out signals.csv
 ```
 
 Notes on the live mode:
@@ -105,7 +105,7 @@ cp .env.example .env
 4. **Test the alert in 10 seconds** (sends the demo signals to your phone):
 
 ```bash
-python -m pattern_scanner.scanner --mode demo --telegram
+python scanner.py --mode demo --telegram
 ```
 
 5. **Daily automatic alerts** — add to crontab (runs 16:30 IST Mon–Fri,
@@ -222,8 +222,8 @@ A ready-to-upload zip is included alongside this folder:
 ## Backtest (find how often it fired)
 
 ```bash
-python -m pattern_scanner.scanner --mode demo --backtest --backtest-days 120
-python -m pattern_scanner.scanner --mode live --backtest --backtest-days 90 --limit 200
+python scanner.py --mode demo --backtest --backtest-days 120
+python scanner.py --mode live --backtest --backtest-days 90 --limit 200
 ```
 
 ## Workflow suggestion
