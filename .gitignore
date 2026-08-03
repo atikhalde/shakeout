@@ -1,0 +1,25 @@
+# ---- secrets (NEVER commit these) ----
+.env
+.env.*
+!.env.example
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# ---- scanner data / outputs ----
+data/cache/
+logs/
+results_*.csv
+backtest_*.csv
+
+# ---- editors / OS ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
