@@ -71,5 +71,6 @@ class ScanConfig:
     # ---------------------------------------------------------------- live
     request_interval: float = 0.25   # seconds between Dhan API calls
                                      # (Dhan data APIs allow 5 req/sec)
-    max_workers: int = 4
+    max_workers: int = 5             # parallel fetch threads (<= 5 to stay
+                                     # within Dhan's 5 req/sec limit)
     api_timeout: float = 20.0

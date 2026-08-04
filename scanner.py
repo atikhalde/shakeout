@@ -226,20 +226,22 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     from_date = to_date - dt.timedelta(days=from_days)
     today_s = to_date.isoformat()
 
+    # ---------------------------------------------------------------- scan
+    import time as _t
+    t0 = _t.time()
     signals, errors = [], 0
-    for i, sym in enumerate(symbols, 1):
+    total = len(symbols)
+
+    def scan_one(sym: str):
+        """Fetch + detect for one symbol. Returns (sig_or_None, error_str)."""
         try:
             bars = client.get_daily(sym, from_date, to_date,
                                     force_refresh=force_refresh)
         except Exception as e:  # noqa: BLE001
-            errors += 1
-            if debug:
-                print(f"  [{sym}] ERROR {e}")
-            continue
+            return None, str(e)
         if bars is None or len(bars.get("close", [])) < cfg.min_bars:
-            continue
+            return None, ""
 
-        # ---- live market: append today's partial candle from intraday ----
         live_merged = False
         if intraday:
             last_d = bars["dates"][-1] if bars["dates"] else ""
@@ -250,20 +252,37 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                     partial = None
                 if partial:
                     bars, live_merged = merge_partial(bars, partial, today_s)
-            # if last_d == today_s, Dhan already gave today's forming bar
 
-        dates = bars["dates"]
-        sig = detect_setup(bars, dates, cfg)
+        sig = detect_setup(bars, bars["dates"], cfg)
         if sig:
             sig["intraday"] = bool(live_merged)
-            signals.append(sig)
-            tag = "LIVE " if live_merged else ""
-            print(f"  SIGNAL {tag}{sym:12s} score={sig['score']:.0f} "
-                  f"signal={sig['signal_date']} ssl={sig['ssl']:.1f} "
-                  f"flush={sig['flush_date']}")
-        if i % 50 == 0:
-            print(f"  ... {i}/{len(symbols)} scanned ({len(signals)} signals, "
-                  f"{errors} errors)")
+        return sig, ""
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
+        futs = {pool.submit(scan_one, s): s for s in symbols}
+        done = 0
+        for fut in as_completed(futs):
+            done += 1
+            sym = futs[fut]
+            sig, err = fut.result()
+            if err:
+                errors += 1
+                if debug:
+                    print(f"  [{sym}] ERROR {err[:120]}")
+            elif sig:
+                signals.append(sig)
+                tag = "LIVE " if sig.get("intraday") else ""
+                print(f"  SIGNAL {tag}{sym:12s} score={sig['score']:.0f} "
+                      f"signal={sig['signal_date']} ssl={sig['ssl']:.1f} "
+                      f"flush={sig['flush_date']}")
+            if done % 100 == 0 or done == total:
+                print(f"  ... {done}/{total} scanned "
+                      f"({len(signals)} signals, {errors} errors) "
+                      f"elapsed ~{done * cfg.request_interval / cfg.max_workers:.0f}s")
+    import time as _t
+    print(f"scanned {total} symbols, {len(signals)} signals, {errors} errors "
+          f"in {_t.time() - t0:.0f}s")
 
     rows = _table_rows(sorted(signals, key=lambda s: -s["score"]))
     _print_table(rows)
