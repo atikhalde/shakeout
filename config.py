@@ -76,11 +76,11 @@ class ScanConfig:
                                      # >= 60 gives ~83% 5-day win vs 71%)
 
     # ---------------------------------------------------------------- live
-    request_interval: float = 0.35   # seconds between Dhan API calls
-                                     # (kept below Dhan's 5 req/sec to avoid
-                                     # 429 rate-limit bursts -> errors + slow
-                                     # scans; 4 workers x ~0.35s = ~2.9 req/s)
-    max_workers: int = 4
+    request_interval: float = 0.5    # seconds between Dhan API calls
+                                     # (Dhan's REAL free-tier limit is ~2/s,
+                                     # not the documented 5/s - 3 workers x
+                                     # 0.5s = ~2 req/s, no more 429 bursts)
+    max_workers: int = 3
 
     # --------------------------------------------------------- backtest
     # "Big move" definition (Sportking-style pop): best close within 15
