@@ -46,7 +46,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install numpy requests
+        run: pip install numpy requests openpyxl
 
       - name: Restore daily bar cache
         uses: actions/cache@v4
@@ -65,12 +65,14 @@ jobs:
             --min-score ${{ inputs.min_score }} \
             --out signals_backtest.csv
 
-      - name: Upload signals CSV
+      - name: Upload signals (CSV + Excel)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: signals-backtest
-          path: signals_backtest.csv
+          path: |
+            signals_backtest.csv
+            signals_backtest.xlsx
           retention-days: 30
 
       - name: Write job summary
