@@ -53,6 +53,26 @@ class TelegramNotifier:
 
     # ------------------------------------------------------------- formatting
     @staticmethod
+    def _d(d) -> str:
+        """Render a date value (ISO string or epoch) safely."""
+        if d is None:
+            return "?"
+        s = str(d)
+        if s.isdigit():
+            import datetime as dt
+            v = int(s)
+            if v > 1e12:
+                v //= 1000
+            if v > 1e10:
+                v //= 1000
+            try:
+                return (dt.datetime.fromtimestamp(v, dt.timezone.utc)
+                        .strftime("%Y-%m-%d"))
+            except (ValueError, OSError, OverflowError):
+                return s
+        return s[:10]
+
+    @staticmethod
     def format_signal(sig: dict) -> str:
         s = sig
         live = bool(s.get("intraday"))
@@ -60,24 +80,41 @@ class TelegramNotifier:
                   if live else "🚨 <b>PATTERN SIGNAL</b> — {sym} ")
         note = ("\n⚠️ <i>Intraday signal — the daily candle is still forming; "
                 "confirm by close.</i>" if live else "")
+
+        # score breakdown: "BOS freshness 20/25 · Flush depth 18/20 · ..."
+        parts = s.get("score_parts") or {}
+        if parts:
+            breakdown = "  ·  ".join(
+                f"{name} {val:.0f}/{max:.0f}"
+                for name, (val, max) in parts.items()
+            )
+            score_line = (f"📊 <b>Score {s['score']:.0f}/100</b> — what's "
+                          f"rewarded:\n{breakdown}")
+        else:
+            score_line = f"📊 <b>Score {s['score']:.0f}/100</b>"
+
         msg = (
             header +
-            "<i>(score {score}/100)</i>\n"
+            "<i>(daily timeframe)</i>\n"
             "📅 <b>{date}</b>  Close ₹{close:.2f}\n"
-            "🔓 BOS: {bos} ({style}) — broke {brk:.2f}\n"
-            "🏔 Peak: {peak:.2f} ({peak_d})\n"
+            "{score_line}\n"
+            "🔓 BOS: {bos} ({style}) — broke ₹{brk:.2f}\n"
+            "🏔 Peak: ₹{peak:.2f} ({peak_d})\n"
             "📉 Flush: −{drop:.1f}% → low ₹{low:.2f} ({low_d})\n"
             "💧 SSL zone: ₹{ssl:.2f} — closes held ≥ ₹{minc:.2f} ✅\n"
             "🟢 Reversal: +{bounce:.1f}% (body ratio {body:.2f})\n"
-            "⏳ Close ₹{close:.2f} still < peak ₹{peak:.2f} "
+            "⏳ Close ₹{close:.2f} still below peak ₹{peak:.2f} "
             "<i>→ big move not fired yet</i>"
         ).format(
-            sym=s["symbol"], score=s["score"], date=s["signal_date"],
-            close=s["last_close"], bos=s["bos_date"], style=s["bos_style"],
-            brk=s["break_level"], peak=s["peak"], peak_d=s["peak_date"],
-            drop=s["flush_drop_pct"], low=s["flush_low"], low_d=s["flush_date"],
+            sym=s["symbol"], score=s["score"], date=TelegramNotifier._d(s["signal_date"]),
+            close=s["last_close"], bos=TelegramNotifier._d(s["bos_date"]),
+            style=s["bos_style"], brk=s["break_level"],
+            peak=s["peak"], peak_d=TelegramNotifier._d(s["peak_date"]),
+            drop=s["flush_drop_pct"], low=s["flush_low"],
+            low_d=TelegramNotifier._d(s["flush_date"]),
             ssl=s["ssl"], minc=s["min_close_after_ssl"],
             bounce=s["bounce_pct"], body=s["body_ratio"],
+            score_line=score_line,
         )
         return msg + note
 

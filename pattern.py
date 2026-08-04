@@ -187,7 +187,7 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
         "days_since_bos": t - bos_day,
         "score": 0.0,
     }
-    signal["score"] = _score(signal, bars, cfg)
+    signal["score"], signal["score_parts"] = _score(signal, bars, cfg)
     return signal
 
 
@@ -195,31 +195,44 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
 # Scoring (0..100)
 # --------------------------------------------------------------------------
 
-def _score(sig: dict, bars: dict, cfg: ScanConfig) -> float:
+def _score(sig: dict, bars: dict, cfg: ScanConfig) -> tuple[float, dict]:
+    """
+    Returns (total_score, parts) where parts = the per-component breakdown
+    (max possible points per component) so alerts can show what is rewarded.
+    """
     c = bars["close"]
-    score = 0.0
 
     # freshness of the BOS (recent = better)
-    score += 25.0 * max(0.0, 1.0 - sig["days_since_bos"] / cfg.bos_oldest)
+    freshness = 25.0 * max(0.0, 1.0 - sig["days_since_bos"] / cfg.bos_oldest)
 
     # depth of the flush (deeper shakeout relative to peak = better, cap 8%)
-    score += 20.0 * min(1.0, sig["flush_drop_pct"] / 8.0)
+    flush = 20.0 * min(1.0, sig["flush_drop_pct"] / 8.0)
 
     # how precisely the flush reached the SSL zone
     off = abs(sig["flush_low"] - sig["ssl"]) / sig["ssl"]
     tol = cfg.ssl_tol_up + cfg.ssl_tol_dn
-    score += 20.0 * max(0.0, 1.0 - off / tol)
+    ssl_prec = 20.0 * max(0.0, 1.0 - off / tol)
 
     # strength of the reversal bounce
-    score += 20.0 * min(1.0, sig["bounce_pct"] / 5.0)
+    bounce = 20.0 * min(1.0, sig["bounce_pct"] / 5.0)
 
     # quality of the reversal candle body
-    score += 15.0 * min(1.0, sig["body_ratio"] / 0.75)
+    body = 15.0 * min(1.0, sig["body_ratio"] / 0.75)
 
     # trend intact bonus (soft)
+    trend = 0.0
     if len(c) >= 50:
         e20, e50 = ema(c, 20), ema(c, 50)
         if e20[-1] > e50[-1]:
-            score += 5.0
+            trend = 5.0
 
-    return round(min(score, 100.0), 1)
+    total = freshness + flush + ssl_prec + bounce + body + trend
+    parts = {
+        "BOS freshness": (round(freshness, 1), 25.0),
+        "Flush depth":   (round(flush, 1), 20.0),
+        "SSL precision": (round(ssl_prec, 1), 20.0),
+        "Reversal bounce": (round(bounce, 1), 20.0),
+        "Candle body":   (round(body, 1), 15.0),
+        "Trend (EMA20/50)": (round(trend, 1), 5.0),
+    }
+    return round(min(total, 100.0), 1), parts

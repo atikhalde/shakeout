@@ -36,6 +36,7 @@ import sys
 from config import ScanConfig
 from env_loader import load_env
 from pattern import detect_setup
+from prefilter import load_mcap, mcap_filter, passes_prefilter
 from telegram_notifier import TelegramNotifier
 
 
@@ -222,6 +223,19 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         symbols = symbols[:limit]
         print(f"limit: scanning first {limit} symbols")
 
+    # ---- prefilter: market cap > X Cr BEFORE any API calls (big win) ----
+    pref_skipped = 0
+    if cfg.prefilter_enabled:
+        mcap = load_mcap(cfg.mcap_file)
+        if mcap:
+            before = len(symbols)
+            symbols, dropped = mcap_filter(symbols, mcap, cfg.prefilter_mcap_min)
+            print(f"mcap prefilter: {before} -> {len(symbols)} "
+                  f"(dropped {dropped} below {cfg.prefilter_mcap_min:.0f} Cr)")
+        else:
+            print(f"WARNING: {cfg.mcap_file} not found - market cap filter "
+                  f"skipped (run build_mcap.py once)")
+
     to_date = dt.date.today()
     from_date = to_date - dt.timedelta(days=from_days)
     today_s = to_date.isoformat()
@@ -233,14 +247,20 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     total = len(symbols)
 
     def scan_one(sym: str):
-        """Fetch + detect for one symbol. Returns (sig_or_None, error_str)."""
+        """Fetch + detect for one symbol. Returns (sig, err, pref_skipped)."""
         try:
             bars = client.get_daily(sym, from_date, to_date,
                                     force_refresh=force_refresh)
         except Exception as e:  # noqa: BLE001
-            return None, str(e)
+            return None, str(e), False
         if bars is None or len(bars.get("close", [])) < cfg.min_bars:
-            return None, ""
+            return None, "", False
+
+        # ---- prefilter: weekly RSI/MACD + close>100 + green daily ----
+        if cfg.prefilter_enabled:
+            ok, why = passes_prefilter(bars, cfg)
+            if not ok:
+                return None, "", True
 
         live_merged = False
         if intraday:
@@ -265,11 +285,13 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         for fut in as_completed(futs):
             done += 1
             sym = futs[fut]
-            sig, err = fut.result()
+            sig, err, pref = fut.result()
             if err:
                 errors += 1
                 if debug:
                     print(f"  [{sym}] ERROR {err[:120]}")
+            elif pref:
+                pref_skipped += 1
             elif sig:
                 signals.append(sig)
                 tag = "LIVE " if sig.get("intraday") else ""
@@ -278,15 +300,15 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                       f"flush={sig['flush_date']}")
             if done % 100 == 0 or done == total:
                 print(f"  ... {done}/{total} scanned "
-                      f"({len(signals)} signals, {errors} errors) "
+                      f"({len(signals)} signals, {errors} errors, "
+                      f"{pref_skipped} prefilter-skipped) "
                       f"elapsed ~{done * cfg.request_interval / cfg.max_workers:.0f}s")
     import time as _t
-    print(f"scanned {total} symbols, {len(signals)} signals, {errors} errors "
-          f"in {_t.time() - t0:.0f}s")
+    print(f"scanned {total} symbols, {len(signals)} signals, {errors} errors, "
+          f"{pref_skipped} prefilter-skipped in {_t.time() - t0:.0f}s")
 
     rows = _table_rows(sorted(signals, key=lambda s: -s["score"]))
     _print_table(rows)
-    print(f"scanned {len(symbols)} symbols, {len(signals)} signals, {errors} errors")
 
     if notifier is not None:
         scope = f"{len(symbols)} symbols"

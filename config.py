@@ -73,4 +73,14 @@ class ScanConfig:
                                      # (Dhan data APIs allow 5 req/sec)
     max_workers: int = 5             # parallel fetch threads (<= 5 to stay
                                      # within Dhan's 5 req/sec limit)
+
+    # --------------------------------------------------------- prefilter
+    # Panel conditions that narrow the universe BEFORE the pattern scan.
+    prefilter_enabled: bool = True
+    prefilter_close_min: float = 100.0    # daily close > 100
+    prefilter_green_daily: bool = True    # daily close > daily open
+    prefilter_rsi_min: float = 60.0       # weekly RSI(14) > 60
+    prefilter_macd_min: float = 0.0       # weekly MACD hist (26,12,9) > 0
+    prefilter_mcap_min: float = 1000.0    # market cap > 1000 Cr
+    mcap_file: str = "data/market_cap.csv"
     api_timeout: float = 20.0

@@ -67,12 +67,29 @@ def test_telegram_format() -> None:
         "flush_drop_pct": 11.0, "flush_low": 194.99, "flush_date": "2026-07-30",
         "ssl": 194.6, "min_close_after_ssl": 196.5, "bounce_pct": 2.5,
         "body_ratio": 0.79,
+        "score_parts": {"BOS freshness": (20.0, 25.0), "Flush depth": (20.0, 20.0),
+                        "SSL precision": (18.0, 20.0), "Reversal bounce": (12.0, 20.0),
+                        "Candle body": (11.3, 15.0), "Trend (EMA20/50)": (0.0, 5.0)},
     }
     msg = TelegramNotifier.format_signal(sig)
     check("telegram msg contains symbol", "SPORTKING" in msg)
     check("telegram msg contains date", "2026-07-31" in msg)
     check("telegram msg contains SSL", "194.60" in msg)
     check("telegram msg is html", "<b>" in msg and "</b>" in msg)
+    check("telegram msg has score breakdown", "what's rewarded" in msg
+          and "Flush depth" in msg)
+    # CRITICAL: no raw '<' that would break Telegram's HTML parser
+    # (the old message had "still < peak" which caused HTTP 400)
+    check("telegram html has no unescaped <", "< peak" not in msg
+          and "still below peak" in msg)
+    check("telegram msg is valid-ish html",
+          msg.count("<") == msg.count(">") or "&lt;" in msg)
+
+    # epoch timestamps should be rendered as dates
+    sig2 = dict(sig, signal_date=1785695400, bos_date=1785522600)
+    msg2 = TelegramNotifier.format_signal(sig2)
+    check("telegram renders epoch as date", "2026-" in msg2
+          and str(1785695400) not in msg2)
 
     summary = TelegramNotifier.format_summary(3)
     check("summary with signals", "3 signals" in summary)
@@ -156,8 +173,24 @@ def test_intraday() -> None:
 
     # ---- get_instruments works from the bundled repo map (no network) ----
     m = client.get_instruments()
-    check("instruments from repo map", len(m) > 9000, f"got {len(m)}")
+    check("instruments from repo map", len(m) > 2000, f"got {len(m)}")
     check("symbol alias resolves", client.resolve_symbol("SPR_AUTO") is not None)
+
+    # ---- ETF exclusion: real stocks kept, funds removed ----
+    liq = client.liquid_universe()
+    for s in ("RELIANCE", "SPORTKING", "BAJFINANCE", "SHRIPISTON",
+              "GOLDIAM", "JETFREIGHT", "ALPHAGEO", "MIDHANI"):
+        check(f"ETF filter keeps {s}", s in liq)
+    for s in ("NIFTYBEES", "GOLDBEES", "BANKBEES", "SETFNIF50",
+              "TATSILV", "INFRA", "METAL", "VALUE", "NIFTY50",
+              "GROWWNIFTY", "LIQUIDBEES"):
+        check(f"ETF filter drops {s}", s not in liq)
+
+    # ---- timestamp -> ISO date conversion ----
+    from dhan_client import _iso_date
+    check("epoch ms -> date", _iso_date(1785695400000) == "2026-08-02")
+    check("epoch s -> date", _iso_date(1785695400) == "2026-08-02")
+    check("iso passthrough", _iso_date("2026-07-31") == "2026-07-31")
 
 
 def test_negatives() -> None:

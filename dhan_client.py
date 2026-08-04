@@ -46,6 +46,50 @@ SYMBOL_ALIASES = {
     "SPR_AUTO": "SHRIPISTON",   # Shriram Pistons renamed to SPR Auto
 }
 
+# ---------------------------------------------------------------------------
+# ETF / fund exclusion (Dhan marks ETFs with SEM_SERIES == 'EQ' too, so we
+# must filter by name). Any symbol containing one of these tokens, or exactly
+# matching one of EXACT_ETF_NAMES, is excluded - EXCEPT the whitelisted real
+# stocks whose names collide (GOLDIAM, JETFREIGHT, ALPHAGEO, BALPHARMA).
+# ---------------------------------------------------------------------------
+ETF_EXCLUDE_TOKENS = (
+    "NIFTY", "SENSEX", "BEES", "IETF", "ETF", "SETF", "GOLD", "SILV",
+    "LIQUID", "SHARIA", "MOMENT", "QUALITY", "VALUE", "GROWTH", "GROWW",
+    "CASE", "ADD", "BETA", "BND", "ALPHA", "NEXT50", "NV20", "MID150",
+    "SMALL250", "SML250", "PSUB", "PRIVATEBANK", "FINNIFTY", "REALTY",
+    "100ESG", "100MOM", "MIDMOM", "MIDCAP", "SMALLCAP", "MIDSMALL",
+    "TOP10", "TOP15", "TOP20", "TOP30", "TOP50", "TOP100", "MOM100",
+    "MOM50", "MOMID", "MOMMID", "CONSUMP", "LICNET", "LICNMID", "LICMF",
+    "ILIQ", "NSETEST",
+)
+ETF_EXACT_NAMES = {
+    "INFRA", "METAL", "VALUE", "HEALTH", "MIDCAP", "SMALLCAP", "MIDSMALL",
+    "ALPHA", "BETA", "CASE", "ADD", "BND", "LIQUID", "GOLD", "SILVER",
+    "NEXT50", "NV20", "MOMENTUM", "MOM100", "MOM50", "PSUBANK", "FINNIFTY",
+    "PRIVATEBANK", "QUALITY30", "TOP20", "TOP50", "REALTY", "SENSEX",
+    "NIFTY50", "NIFTY100", "NIFTY500", "GOLD1", "SILVER1", "LIQUID1",
+    "MID150", "SMALL250", "SML250",
+}
+ETF_WHITELIST_REAL = {"JETFREIGHT", "GOLDIAM", "ALPHAGEO", "BALPHARMA"}
+
+
+def _iso_date(ts) -> str:
+    """Normalize a Dhan timestamp (epoch ms or s, or ISO string) to YYYY-MM-DD."""
+    s = str(ts)
+    if s.isdigit():
+        v = int(s)
+        if v > 1e12:
+            v //= 1000          # milliseconds -> seconds
+        if v > 1e10:
+            v //= 1000
+        import datetime as _dt
+        try:
+            return (_dt.datetime.fromtimestamp(v, _dt.timezone.utc)
+                    .strftime("%Y-%m-%d"))
+        except (ValueError, OSError, OverflowError):
+            return s[:10]
+    return s[:10]
+
 
 class DhanClient:
     def __init__(self, token: str, client_id: Optional[str] = None,
@@ -154,14 +198,18 @@ class DhanClient:
 
     @staticmethod
     def _parse_master(text: str) -> dict[str, str]:
-        """Parse the compact scrip master -> {SYMBOL: security_id}."""
+        """Parse the compact scrip master -> {SYMBOL: security_id}.
+        Keeps only NSE equity-series rows (SEM_SERIES == 'EQ'); ETFs and
+        bonds are still included here (they are removed later by
+        liquid_universe())."""
         out: dict[str, str] = {}
         reader = csv.DictReader(io.StringIO(text))
         for row in reader:
             exch = (row.get("SEM_EXM_EXCH_ID") or "").strip()
             seg = (row.get("SEM_SEGMENT") or "").strip()
             expiry = (row.get("SEM_EXPIRY_DATE") or "").strip()
-            if exch != "NSE" or seg != "E" or expiry:
+            series = (row.get("SEM_SERIES") or "").strip()
+            if exch != "NSE" or seg != "E" or expiry or series != "EQ":
                 continue
             sym = (row.get("SEM_TRADING_SYMBOL") or "").strip()
             sid = (row.get("SEM_SMST_SECURITY_ID") or "").strip()
@@ -200,24 +248,24 @@ class DhanClient:
 
     def liquid_universe(self) -> list[str]:
         """
-        Symbols of real tradable equities (drops bonds, SGBs, T-bills, test
-        scrips, etc.) - what a full-market scan should iterate.
+        Symbols of real tradable equities - drops ETFs, index funds, bonds,
+        SGBs, T-bills and test scrips - what a full-market scan should
+        iterate. Real stocks whose names collide with ETF tokens (GOLDIAM,
+        JETFREIGHT, ALPHAGEO, BALPHARMA) are protected by the whitelist.
         """
-        import re
         try:
             m = self.get_instruments()
         except RuntimeError:
             return []
 
-        def is_junk(s: str) -> bool:
-            if len(s) > 1 and re.search(r"[0-9]", s[1:]):
+        def is_fund(s: str) -> bool:
+            if s in ETF_WHITELIST_REAL:
+                return False
+            if s in ETF_EXACT_NAMES:
                 return True
-            if any(k in s for k in ("SGB", "GS20", "GS30", "NSETEST",
-                                    "INVIT", "BEES", "GILT", "TBIL")):
-                return True
-            return False
+            return any(t in s for t in ETF_EXCLUDE_TOKENS)
 
-        return sorted(s for s in m if not is_junk(s))
+        return sorted(s for s in m if not is_fund(s))
 
     # ----------------------------------------------------------------- OHLC
     def get_daily(self, symbol: str, from_date: dt.date, to_date: dt.date,
@@ -346,7 +394,7 @@ class DhanClient:
             if not ts:
                 return None
             return {
-                "dates": [str(x)[:10] for x in ts],
+                "dates": [_iso_date(x) for x in ts],
                 "open": inner["open"], "high": inner["high"],
                 "low": inner["low"], "close": inner["close"],
                 "volume": inner.get("volume", [0] * len(inner["close"])),
@@ -357,7 +405,8 @@ class DhanClient:
             for row in inner:
                 try:
                     rows.append({
-                        "dates": str(row.get("timestamp") or row.get("date"))[:10],
+                        "dates": _iso_date(row.get("timestamp")
+                                           or row.get("date")),
                         "open": float(row["open"]), "high": float(row["high"]),
                         "low": float(row["low"]), "close": float(row["close"]),
                         "volume": float(row.get("volume", 0) or 0),
