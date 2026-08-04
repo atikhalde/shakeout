@@ -127,14 +127,22 @@ class DhanClient:
             try:
                 r = requests.post(BASE_URL + path, json=payload,
                                   headers=headers, timeout=self.timeout)
-                # 429 = "slow down" - DO NOT retry (retrying makes it worse)
+                # 429 = "slow down" - DO NOT retry immediately (it makes
+                # throttling worse); adapt the throttle instead
                 if r.status_code == 429:
+                    with self._lock:
+                        self.min_interval = min(2.5, self.min_interval * 1.5)
                     raise requests.HTTPError(
-                        f"429 rate limited ({path}) - throttled")
+                        f"429 rate limited ({path}) - throttled "
+                        f"(interval now {self.min_interval:.2f}s)")
                 if r.status_code in (500, 502, 503, 504) and attempt < self.max_retries - 1:
                     time.sleep(1.5 * (attempt + 1))
                     continue
                 r.raise_for_status()
+                # gentle recovery: slowly return toward the base interval
+                with self._lock:
+                    if self.min_interval > 0.5:
+                        self.min_interval = max(0.5, self.min_interval * 0.95)
                 return r
             except requests.RequestException as e:
                 last_err = e

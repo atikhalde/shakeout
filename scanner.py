@@ -38,6 +38,7 @@ from env_loader import load_env
 from pattern import detect_setup
 from prefilter import load_mcap, mcap_filter, passes_prefilter
 from telegram_notifier import TelegramNotifier
+from tracker import log_signal, update_open
 
 
 def _table_rows(signals: list[dict]) -> list[dict]:
@@ -238,6 +239,18 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             print(f"WARNING: {cfg.mcap_file} not found - market cap filter "
                   f"skipped (run build_mcap.py once)")
 
+    # ---- hard cap so a run finishes in ~5-8 min (not 60+) ----
+    if len(symbols) > cfg.max_symbols_scan:
+        if mcap:
+            # keep the highest-mcap symbols (best candidates first)
+            symbols = sorted(
+                symbols, key=lambda s: mcap.get(s, 0.0), reverse=True
+            )[:cfg.max_symbols_scan]
+        else:
+            symbols = symbols[:cfg.max_symbols_scan]
+        print(f"universe capped: scanning {len(symbols)} symbols "
+              f"(max_symbols_scan={cfg.max_symbols_scan})")
+
     to_date = dt.date.today()
     from_date = to_date - dt.timedelta(days=from_days)
     today_s = to_date.isoformat()
@@ -313,10 +326,14 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                       f"signal={sig['signal_date']} ssl={sig['ssl']:.1f} "
                       f"flush={sig['flush_date']}")
             if done % 100 == 0 or done == total:
+                el = _t.time() - t0
+                rate = done / max(el, 1e-6)
+                eta = (total - done) / rate if rate > 0 else float("inf")
                 print(f"  ... {done}/{total} scanned "
                       f"({len(signals)} signals, {errors} errors, "
                       f"{pref_skipped} prefilter-skipped) "
-                      f"elapsed ~{done * cfg.request_interval / cfg.max_workers:.0f}s")
+                      f"[{el:.0f}s elapsed, {rate:.1f} sym/s, "
+                      f"ETA {eta/60:.1f} min]", flush=True)
     import time as _t
     print(f"scanned {total} symbols, {len(signals)} signals, {errors} errors, "
           f"{pref_skipped} prefilter-skipped in {_t.time() - t0:.0f}s")
@@ -328,6 +345,17 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             print(f"  e.g. {s}")
     rows = _table_rows(sorted(signals, key=lambda s: -s["score"]))
     _print_table(rows)
+
+    # ---- tracking sheet: log new signals + mark OPEN rows HIT/MISS ----
+    if cfg.tracker_enabled:
+        added = sum(1 for s in signals if log_signal(s, cfg.tracker_file))
+        try:
+            updated = update_open(cfg.tracker_file, client)
+        except Exception as e:  # noqa: BLE001
+            updated = 0
+            print(f"WARNING: tracker update failed: {e}", file=sys.stderr)
+        print(f"tracker: {added} new logged, {updated} OPEN -> HIT/MISS "
+              f"({cfg.tracker_file})")
 
     if notifier is not None:
         scope = f"{len(symbols)} symbols"

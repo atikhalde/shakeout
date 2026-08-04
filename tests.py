@@ -78,6 +78,9 @@ def test_telegram_format() -> None:
     check("telegram msg is html", "<b>" in msg and "</b>" in msg)
     check("telegram msg has score breakdown", "what's rewarded" in msg
           and "Flush depth" in msg)
+    check("telegram msg has trade plan", "TRADE PLAN" in msg
+          and "Entry" in msg and "Stop" in msg and "R:R" in msg)
+    check("telegram msg has volume info", "volume" in msg.lower())
     # CRITICAL: no raw '<' that would break Telegram's HTML parser
     # (the old message had "still < peak" which caused HTTP 400)
     check("telegram html has no unescaped <", "< peak" not in msg
@@ -298,6 +301,45 @@ def test_backtest_finds_verified_stocks() -> None:
             check(f"{sym} has recent flag", "recent" in hit[0])
 
 
+def test_tracker() -> None:
+    print("== signal tracking sheet ==")
+    import os, tempfile, datetime as dt
+    import numpy as np
+    from tracker import log_signal, read, update_open
+    from pattern import detect_setup
+    from demo_data import demo_universe
+
+    dates, bars, _ = demo_universe()["BAJFINANCE"]
+    sig = detect_setup(bars, dates, ScanConfig())
+    f = os.path.join(tempfile.mkdtemp(), "tracker.csv")
+
+    check("log adds row", log_signal(sig, f) is True)
+    check("duplicate rejected", log_signal(sig, f) is False)
+    rows = read(f)
+    check("row has trade plan fields",
+          rows and rows[0]["stop"] and rows[0]["target"] and rows[0]["rr"])
+
+    class FakeClient:
+        def get_daily(self, sym, frm, to, force_refresh=False):
+            c = list(bars["close"]); dts = list(dates)
+            last = c[-1]
+            for k in range(10):
+                last *= 1.015
+                c.append(last)
+                d = dt.date.fromisoformat(dts[-1]) + dt.timedelta(days=1)
+                while d.weekday() >= 5:
+                    d += dt.timedelta(days=1)
+                dts.append(d.isoformat())
+            return {"open": np.array(c), "high": np.array(c),
+                    "low": np.array(c), "close": np.array(c),
+                    "volume": np.ones(len(c)) * 1e6, "dates": dts}
+
+    upd = update_open(f, FakeClient())
+    rows = read(f)
+    check("OPEN -> HIT after 5 sessions", upd == 1 and rows[0]["status"] == "HIT")
+    check("r5 recorded", rows[0]["r5"] != "")
+
+
 def test_negatives() -> None:
     print("== negative cases (must NOT flag) ==")
     cfg = ScanConfig()
@@ -333,6 +375,7 @@ def main() -> int:
     test_positives()
     test_aci_26w_proximity()
     test_backtest_finds_verified_stocks()
+    test_tracker()
     test_run_live_unpack()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")

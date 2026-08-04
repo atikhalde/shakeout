@@ -532,7 +532,9 @@ def main() -> int:
                 bars["dates"] = [_iso_date(d) for d in bars["dates"]]
             else:
                 import yfinance as yf
-                df = yf.Ticker(f"{sym}.NS").history(
+                # Yahoo still lists Shriram Pistons under its old name
+                yf_sym = {"SPR_AUTO": "SHRIPISTON"}.get(sym, sym)
+                df = yf.Ticker(f"{yf_sym}.NS").history(
                     start=start, end=end, auto_adjust=True)
                 if df is None or df.empty:
                     raise ValueError("empty")

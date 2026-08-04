@@ -93,16 +93,22 @@ class TelegramNotifier:
         else:
             score_line = f"📊 <b>Score {s['score']:.0f}/100</b>"
 
-        # big-move context (mirrors the backtest's +8% pop definition)
-        bm_pct = s.get("big_move_pct") or 8.0
-        bm_target = s["ssl"] * (1 + bm_pct / 100.0)
-        headroom = (bm_target / max(s["last_close"], 1e-9) - 1) * 100.0
-        if headroom >= 0:
-            bm_line = (f"💥 Big-move target (SSL +{bm_pct:.0f}%): ₹{bm_target:.2f} "
-                       f"— {headroom:+.1f}% from current close")
-        else:
-            bm_line = (f"💥 Big-move target (SSL +{bm_pct:.0f}%): ₹{bm_target:.2f} "
-                       f"— already above (headroom {headroom:+.1f}%)")
+        # ---- defined-risk trade plan (entry/stop/target/R:R) ----
+        stop = s.get("stop_level") or s["ssl"]
+        target = s.get("target_level") or s["ssl"] * 1.08
+        close = s["last_close"]
+        stop_pct = (close - stop) / close * 100
+        tgt_pct = (target - close) / close * 100
+        rr = s.get("rr")
+        rr_s = f"{rr:.2f}" if rr is not None else "?"
+        surge = s.get("vol_surge")
+        surge_s = f"{surge:.2f}x" if surge else "n/a"
+        plan_line = (
+            f"🎯 <b>TRADE PLAN</b> — Entry ₹{close:.2f} · Stop ₹{stop:.2f} "
+            f"(−{stop_pct:.1f}%) · Target ₹{target:.2f} (+{tgt_pct:.1f}%) · "
+            f"R:R {rr_s}\n"
+            f"🔥 Reversal volume {surge_s} of 20d avg <i>(info)</i>"
+        )
 
         msg = (
             header +
@@ -114,7 +120,7 @@ class TelegramNotifier:
             "📉 Flush: −{drop:.1f}% → low ₹{low:.2f} ({low_d})\n"
             "💧 SSL zone: ₹{ssl:.2f} — closes held ≥ ₹{minc:.2f} ✅\n"
             "🟢 Reversal: +{bounce:.1f}% (body ratio {body:.2f})\n"
-            "{bm_line}\n"
+            "{plan_line}\n"
             "⏳ Close ₹{close:.2f} still below peak ₹{peak:.2f} "
             "<i>→ big move not fired yet</i>\n"
             "📈 Trade it as a <b>short-term bounce (3–7 days)</b> — backtest "
@@ -128,7 +134,7 @@ class TelegramNotifier:
             low_d=TelegramNotifier._d(s["flush_date"]),
             ssl=s["ssl"], minc=s["min_close_after_ssl"],
             bounce=s["bounce_pct"], body=s["body_ratio"],
-            score_line=score_line, bm_line=bm_line,
+            score_line=score_line, plan_line=plan_line,
         )
         return msg + note
 

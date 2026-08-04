@@ -200,6 +200,15 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
         "big_move_pct": cfg.big_move_pct,
         "big_move_headroom_pct": (1 + cfg.big_move_pct / 100.0
                                   ) * ssl / max(c[t], 1e-9) - 1.0,
+        # ---- defined-risk trade plan (entry/stop/target/R:R) ----
+        "stop_level": ssl,                       # stop = below SSL
+        "target_level": ssl * (1 + cfg.big_move_pct / 100.0),  # SSL + 8%
+        "rr": ((ssl * (1 + cfg.big_move_pct / 100.0) - c[t])
+               / max(c[t] - ssl, 1e-9)),
+        "vol_surge": float(
+            v[t] / max(float(np.mean(v[t - 20:t])) if t >= 20
+                       else float(np.mean(v[:t])), 1e-9)
+        ),
         "score": 0.0,
     }
     signal["score"], signal["score_parts"] = _score(signal, bars, cfg)

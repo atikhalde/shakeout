@@ -345,6 +345,29 @@ Tips:
 - `--source yfinance` works locally without a Dhan token
   (`pip install yfinance`) if you want a quick sanity check.
 
+
+## 🎯 Trade manager (implemented after live validation)
+
+Validated against the user's 3 real stocks (BAJFINANCE 27-Jul +9.9%,
+SPR_AUTO 27-Jul +4.1%, SPORTKING 31-Jul +14%): a volume-surge filter or a
+NIFTY-regime filter would have REJECTED all three - this is a COUNTER-TREND
+pattern (it fires right after a flush, often in weak markets). So:
+
+| Implemented | Dropped (would have killed the best trades) |
+|---|---|
+| ✅ **Score >= 70** default alert threshold (backtest: 25% big-move rate vs 18% at 60) | ❌ Volume-surge as a hard filter (reversal days were 0.6-0.8x, not 1.5x) |
+| ✅ **Trade plan in every alert**: Entry = close, Stop = below SSL, Target = SSL+8%, R:R | ❌ NIFTY-regime gate (NIFTY was below its 20-EMA on all 3 signal days) |
+| ✅ **Volume surge shown as INFO** (not a filter) | |
+| ✅ **Signal tracking sheet** (`signals_tracker.csv`): every alert logged with entry/stop/target/rr; marked HIT/MISS ~5 sessions later automatically | |
+| ✅ **Exit discipline**: pattern is a 3-7 day bounce; book profit around +6% (`take_profit_pct`) | |
+
+Example alert section:
+```
+🎯 TRADE PLAN — Entry ₹201.44 · Stop ₹194.80 (−3.3%) · Target ₹210.38 (+4.4%) · R:R 1.35
+🔥 Reversal volume 1.96x of 20d avg (info)
+```
+Track: `python tracker.py --report`
+
 ## 📦 GitHub setup
 
 The folder is ready to push as-is:

@@ -75,15 +75,26 @@ class ScanConfig:
     near_ssl_close_min: float = 1.005  # signal close must be >= SSL * this
 
     # -------------------------------------------------------------- scoring
-    score_threshold: float = 60.0    # min score to report (backtest: score
-                                     # >= 60 gives ~83% 5-day win vs 71%)
+    # Trade threshold. Backtest: score>=70 -> 25% big-move rate vs 18% at 60.
+    # The 3 verified stocks scored 77-87 - all comfortably above 70.
+    score_threshold: float = 70.0    # min score to report/alert
+    take_profit_pct: float = 6.0     # suggested book-profit (exit discipline)
+
+    # ------------------------------------------------------------ tracking
+    tracker_enabled: bool = True     # log every alert to CSV, mark HIT/MISS
+    tracker_file: str = "signals_tracker.csv"   # after ~5 sessions
 
     # ---------------------------------------------------------------- live
     request_interval: float = 0.5    # seconds between Dhan API calls
-                                     # (Dhan's REAL free-tier limit is ~2/s,
-                                     # not the documented 5/s - 3 workers x
-                                     # 0.5s = ~2 req/s, no more 429 bursts)
+                                     # (Dhan's REAL free-tier limit is ~2/s;
+                                     # 3 workers x 0.5s = ~2 req/s)
     max_workers: int = 3
+    # hard cap on symbols scanned per run - the full ~2145-symbol liquid
+    # universe at 2 req/s takes 18+ min MINIMUM plus Dhan latency from
+    # GitHub's US runners (often 60+ min). Cap it so a daily run finishes
+    # in ~5-8 min. The mcap prefilter runs first (drops known <1000Cr),
+    # then this cap trims to the highest-mcap names when exceeded.
+    max_symbols_scan: int = 800
 
     # --------------------------------------------------------- backtest
     # "Big move" definition (Sportking-style pop): best close within 15
