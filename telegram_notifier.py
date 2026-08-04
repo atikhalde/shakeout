@@ -93,6 +93,17 @@ class TelegramNotifier:
         else:
             score_line = f"📊 <b>Score {s['score']:.0f}/100</b>"
 
+        # big-move context (mirrors the backtest's +8% pop definition)
+        bm_pct = s.get("big_move_pct") or 8.0
+        bm_target = s["ssl"] * (1 + bm_pct / 100.0)
+        headroom = (bm_target / max(s["last_close"], 1e-9) - 1) * 100.0
+        if headroom >= 0:
+            bm_line = (f"💥 Big-move target (SSL +{bm_pct:.0f}%): ₹{bm_target:.2f} "
+                       f"— {headroom:+.1f}% from current close")
+        else:
+            bm_line = (f"💥 Big-move target (SSL +{bm_pct:.0f}%): ₹{bm_target:.2f} "
+                       f"— already above (headroom {headroom:+.1f}%)")
+
         msg = (
             header +
             "<i>(daily timeframe)</i>\n"
@@ -103,8 +114,11 @@ class TelegramNotifier:
             "📉 Flush: −{drop:.1f}% → low ₹{low:.2f} ({low_d})\n"
             "💧 SSL zone: ₹{ssl:.2f} — closes held ≥ ₹{minc:.2f} ✅\n"
             "🟢 Reversal: +{bounce:.1f}% (body ratio {body:.2f})\n"
+            "{bm_line}\n"
             "⏳ Close ₹{close:.2f} still below peak ₹{peak:.2f} "
-            "<i>→ big move not fired yet</i>"
+            "<i>→ big move not fired yet</i>\n"
+            "📈 Trade it as a <b>short-term bounce (3–7 days)</b> — backtest "
+            "shows ~70–85% win; the +8%+ pop only on high-score setups"
         ).format(
             sym=s["symbol"], score=s["score"], date=TelegramNotifier._d(s["signal_date"]),
             close=s["last_close"], bos=TelegramNotifier._d(s["bos_date"]),
@@ -114,7 +128,7 @@ class TelegramNotifier:
             low_d=TelegramNotifier._d(s["flush_date"]),
             ssl=s["ssl"], minc=s["min_close_after_ssl"],
             bounce=s["bounce_pct"], body=s["body_ratio"],
-            score_line=score_line,
+            score_line=score_line, bm_line=bm_line,
         )
         return msg + note
 

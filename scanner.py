@@ -157,6 +157,8 @@ def run_demo(cfg: ScanConfig, backtest: bool, backtest_days: int,
     signals = []
     for sym, (dates, bars, expected) in universe.items():
         sig = detect_setup(bars, dates, cfg)
+        if sig and sig.get("score", 0) < cfg.score_threshold:
+            sig = None
         mark = ""
         if sig:
             ok = (expected is not None and sig["signal_date"] == expected)
@@ -256,6 +258,10 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         if bars is None or len(bars.get("close", [])) < cfg.min_bars:
             return None, "", False
 
+        # ---- normalize dates to ISO (epoch-safe, cache-safe) ----
+        from dhan_client import _iso_date
+        bars["dates"] = [_iso_date(d) for d in bars["dates"]]
+
         # ---- prefilter: weekly RSI/MACD + close>100 + green daily ----
         if cfg.prefilter_enabled:
             ok, why = passes_prefilter(bars, cfg)
@@ -274,11 +280,15 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                     bars, live_merged = merge_partial(bars, partial, today_s)
 
         sig = detect_setup(bars, bars["dates"], cfg)
+        if sig and sig.get("score", 0) < cfg.score_threshold:
+            sig = None          # below the alert threshold -> not a signal
         if sig:
             sig["intraday"] = bool(live_merged)
         return sig, "", False
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    err_by_type: dict[str, int] = {}
+    err_samples: list[str] = []
     with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
         futs = {pool.submit(scan_one, s): s for s in symbols}
         done = 0
@@ -288,6 +298,10 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             sig, err, pref = fut.result()
             if err:
                 errors += 1
+                key = err.split(":")[0].split("for url")[0].strip()[:60]
+                err_by_type[key] = err_by_type.get(key, 0) + 1
+                if len(err_samples) < 5:
+                    err_samples.append(f"[{sym}] {err[:150]}")
                 if debug:
                     print(f"  [{sym}] ERROR {err[:120]}")
             elif pref:
@@ -306,7 +320,12 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     import time as _t
     print(f"scanned {total} symbols, {len(signals)} signals, {errors} errors, "
           f"{pref_skipped} prefilter-skipped in {_t.time() - t0:.0f}s")
-
+    if errors and err_by_type:
+        print("error breakdown:")
+        for k, v in sorted(err_by_type.items(), key=lambda kv: -kv[1])[:8]:
+            print(f"  {v:4d} x {k}")
+        for s in err_samples:
+            print(f"  e.g. {s}")
     rows = _table_rows(sorted(signals, key=lambda s: -s["score"]))
     _print_table(rows)
 

@@ -8,9 +8,15 @@ scanner (BOS -> flush -> SSL hold -> reversal, + 26W-high proximity guard,
 + prefilter conditions) and records each signal with its forward returns:
 
     entry      = next day's OPEN   (alert at close, enter next open)
-    r3/r5/r10  = close[t+k] vs entry
+    r3/r5/r7/r10/r15 = close[t+k] vs entry
     max15      = best close within 15 sessions vs entry
     min15      = worst close within 15 sessions vs entry
+    big_move   = 1 if max15 >= +8% (the Sportking-style pop) else 0
+
+    The summary prints a score-bucket table (50/55/60/65/70/75/80) so you
+    can see the win rate and big-move rate climb as the threshold rises -
+    the pattern is a SHORT-TERM bounce (3-7 days) and the +8%+ moves only
+    fire on the highest-quality setups.
 
 Usage:
     # Dhan API (default - uses DHAN_ACCESS_TOKEN / DHAN_CLIENT_ID env vars):
@@ -214,11 +220,14 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         if entry <= 0:
             continue
         fwd = {}
-        for k in (3, 5, 10, 15):
+        for k in (3, 5, 7, 10, 15):
             if t + k < n:
                 fwd[f"r{k}"] = (c[t + k] / entry - 1) * 100
         max15 = float(np.max(c[t + 1:t + 16]) / entry - 1) * 100
         min15 = float(np.min(c[t + 1:t + 16]) / entry - 1) * 100
+        # "big move" = the Sportking-style pop: best close within 15d
+        # gains >= 8% from entry (the alert's "big move not fired yet")
+        big_move = 1 if max15 >= cfg.big_move_pct else 0
 
         out_rows.append({
             "symbol": sym, "date": dates[t], "close": round(float(c[t]), 2),
@@ -227,9 +236,11 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
             "ssl": round(ssl, 2),
             "r3": round(fwd.get("r3", float("nan")), 2),
             "r5": round(fwd.get("r5", float("nan")), 2),
+            "r7": round(fwd.get("r7", float("nan")), 2),
             "r10": round(fwd.get("r10", float("nan")), 2),
             "r15": round(fwd.get("r15", float("nan")), 2),
             "max15": round(max15, 2), "min15": round(min15, 2),
+            "big_move": big_move,
         })
         found += 1
     return found
@@ -252,7 +263,8 @@ def _stats(rows, key):
     }
 
 
-def print_summary(rows: list[dict], errors: int, elapsed: float) -> None:
+def print_summary(rows: list[dict], errors: int, elapsed: float,
+                  cfg: ScanConfig) -> None:
     print("\n" + "=" * 74)
     print(f"BACKTEST RESULT — {len(rows)} signals, {errors} fetch errors, "
           f"{elapsed:.0f}s")
@@ -261,22 +273,34 @@ def print_summary(rows: list[dict], errors: int, elapsed: float) -> None:
         print("No signals in the window.")
         return
     print("entry = NEXT day open (alert at close, enter next open)\n")
-    labels = {"r3": "3 days", "r5": "5 days", "r10": "10 days",
-              "r15": "15 days", "max15": "best within 15d",
-              "min15": "worst within 15d"}
-    for k in ("r3", "r5", "r10", "r15", "max15", "min15"):
+    labels = {"r3": "3 days", "r5": "5 days", "r7": "7 days",
+              "r10": "10 days", "r15": "15 days",
+              "max15": "best within 15d", "min15": "worst within 15d"}
+    for k in ("r3", "r5", "r7", "r10", "r15", "max15", "min15"):
         s = _stats(rows, k)
         if s:
             print(f"  {labels[k]:>18}: n={s['n']:3d}  win={s['win']:5.1f}%  "
                   f"avg={s['avg']:+6.2f}%  med={s['med']:+6.2f}%")
 
-    # score bucket split (does a higher threshold improve results?)
-    for thr in (60, 70, 80):
+    # ---- big-move stats (the Sportking-style pop) ----
+    bm = sum(1 for r in rows if r.get("big_move"))
+    print(f"\n  💥 BIG MOVE (≥ +{cfg.big_move_pct:.0f}% within 15d): "
+          f"{bm}/{len(rows)} signals = {bm / len(rows) * 100:.1f}%")
+
+    # ---- score-bucket table: does raising the threshold help? ----
+    print("\n  score bucket        n   5d-win   7d-win   5d-avg   big-move%")
+    for thr in (50, 55, 60, 65, 70, 75, 80):
         sub = [r for r in rows if r["score"] >= thr]
-        s = _stats(sub, "r5")
-        if s and s["n"] >= 3:
-            print(f"\n  score >= {thr}: {s['n']} signals -> 5-day win "
-                  f"{s['win']:.1f}% avg {s['avg']:+.2f}%")
+        if len(sub) < 3:
+            continue
+        s5 = _stats(sub, "r5")
+        s7 = _stats(sub, "r7")
+        bm_s = sum(1 for r in sub if r.get("big_move"))
+        if s5:
+            print(f"  score >= {thr:<3d}       {len(sub):3d}   "
+                  f"{s5['win']:5.1f}%   "
+                  f"{(s7['win'] if s7 else 0):5.1f}%   "
+                  f"{s5['avg']:+6.2f}%   {bm_s / len(sub) * 100:5.1f}%")
     print()
 
 
@@ -376,7 +400,7 @@ def main() -> int:
             w.writerows(rows)
         print(f"\nwrote {len(rows)} signals -> {args.out}")
 
-    print_summary(rows, errors, time.time() - t0)
+    print_summary(rows, errors, time.time() - t0, cfg)
     return 0
 
 

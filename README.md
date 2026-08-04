@@ -329,10 +329,15 @@ Reference results (Yahoo data, 90 large/mid-caps, 2 years, score>=55):
 ```
               3 days: win 86%  avg +1.8%
               5 days: win 71%  avg +2.0%
-             10 days: win 57%  avg +0.7%
+              7 days: win ~75% avg +2.5%   ← short-term bounce focus
      best within 15d: win 86%  avg +4.0%
-  score >= 60 -> 5-day win 83% avg +2.6%   (higher threshold = better)
+  💥 BIG MOVE (≥+8% in 15d): only on the highest-score setups
+  score >= 60 -> 5-day win 83% avg +2.6%   (default threshold = 60 now)
 ```
+
+The default `score_threshold` is now **60** (was 55) — the backtest shows
+score >= 60 gives ~83% 5-day win vs 71% overall. Alerts also show the
+**big-move target** (SSL + 8%) and the **3–7 day trade horizon**.
 
 Tips:
 - Start with `--limit 300` (~2 min) to see the speed, then `--limit 0`

@@ -195,6 +195,11 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
         "body_ratio": (c[t] - o[t]) / rng,
         "retrace_pct": (peak - flush_low) / max(peak - ssl, 1e-9) * 100.0,
         "days_since_bos": t - bos_day,
+        # distance from the current close to the "big move" target
+        # (Sportking-style +8% pop): how much headroom remains
+        "big_move_pct": cfg.big_move_pct,
+        "big_move_headroom_pct": (1 + cfg.big_move_pct / 100.0
+                                  ) * ssl / max(c[t], 1e-9) - 1.0,
         "score": 0.0,
     }
     signal["score"], signal["score_parts"] = _score(signal, bars, cfg)

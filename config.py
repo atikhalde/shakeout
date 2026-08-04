@@ -72,13 +72,20 @@ class ScanConfig:
     near_ssl_close_min: float = 1.005  # signal close must be >= SSL * this
 
     # -------------------------------------------------------------- scoring
-    score_threshold: float = 55.0    # min score to report
+    score_threshold: float = 60.0    # min score to report (backtest: score
+                                     # >= 60 gives ~83% 5-day win vs 71%)
 
     # ---------------------------------------------------------------- live
-    request_interval: float = 0.25   # seconds between Dhan API calls
-                                     # (Dhan data APIs allow 5 req/sec)
-    max_workers: int = 5             # parallel fetch threads (<= 5 to stay
-                                     # within Dhan's 5 req/sec limit)
+    request_interval: float = 0.35   # seconds between Dhan API calls
+                                     # (kept below Dhan's 5 req/sec to avoid
+                                     # 429 rate-limit bursts -> errors + slow
+                                     # scans; 4 workers x ~0.35s = ~2.9 req/s)
+    max_workers: int = 4
+
+    # --------------------------------------------------------- backtest
+    # "Big move" definition (Sportking-style pop): best close within 15
+    # sessions gains at least this much vs the next-day-open entry.
+    big_move_pct: float = 8.0
 
     # --------------------------------------------------------- prefilter
     # Panel conditions that narrow the universe BEFORE the pattern scan.
