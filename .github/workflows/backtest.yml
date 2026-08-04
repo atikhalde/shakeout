@@ -1,0 +1,87 @@
+name: Backtest
+
+# -------------------------------------------------------------
+# Run the shakeout-pattern backtest on REAL Dhan historical data.
+# Trigger manually: Actions -> Backtest -> Run workflow.
+# Results: signals_backtest.csv artifact + summary on the run page.
+#
+# Inputs:
+#   years      = how many years of history (default 2)
+#   limit      = max symbols to scan (0 = whole liquid universe ~2145).
+#                Start with 300-500 to see the speed, then go full.
+#   min_score  = only report signals with score >= this (default 55)
+#
+# Cost: ~2145 Dhan calls at 5/sec ≈ 2-4 min + analysis ≈ 5-8 min total.
+# -------------------------------------------------------------
+"on":
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "Years of history"
+        type: number
+        default: 2
+      limit:
+        description: "Max symbols (0 = all ~2145)"
+        type: number
+        default: 500
+      min_score:
+        description: "Minimum signal score"
+        type: number
+        default: 55
+
+permissions:
+  contents: read
+
+env:
+  DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+  DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+
+jobs:
+  backtest:
+    name: Backtest on Dhan history
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install numpy requests
+
+      - name: Restore daily bar cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache
+          key: backtest-dhan-${{ inputs.years }}y-${{ github.run_id }}
+          restore-keys: |
+            backtest-dhan-
+
+      - name: Run backtest
+        run: |
+          python backtest.py \
+            --source dhan \
+            --years ${{ inputs.years }} \
+            --limit ${{ inputs.limit }} \
+            --min-score ${{ inputs.min_score }} \
+            --out signals_backtest.csv
+
+      - name: Upload signals CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signals-backtest
+          path: signals_backtest.csv
+          retention-days: 30
+
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f signals_backtest.csv ] && [ -s signals_backtest.csv ]; then
+            echo "## 📊 Backtest signals ($(wc -l < signals_backtest.csv) rows)" \
+                 >> $GITHUB_STEP_SUMMARY
+            echo '```csv' >> $GITHUB_STEP_SUMMARY
+            cat signals_backtest.csv >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No signals." >> $GITHUB_STEP_SUMMARY
+          fi
