@@ -21,16 +21,17 @@ import requests
 
 
 def _parse_dhan_csv(text: str) -> list[str]:
+    """NSE equities from the compact scrip master (exch=NSE, seg=E)."""
     symbols = []
     reader = csv.DictReader(io.StringIO(text))
     for row in reader:
+        exch = (row.get("SEM_EXM_EXCH_ID") or "").strip()
         seg = (row.get("SEM_SEGMENT") or "").strip()
         expiry = (row.get("SEM_EXPIRY_DATE") or "").strip()
-        if seg != "NSE_EQ" or expiry:
+        if exch != "NSE" or seg != "E" or expiry:
             continue
-        sym = (row.get("SEM_TRADING_SYMBOL") or
-               row.get("SEM_INSTRUMENT_NAME") or "").strip()
-        if sym and not any(ch.isdigit() for ch in sym.split()[-1:]):
+        sym = (row.get("SEM_TRADING_SYMBOL") or "").strip()
+        if sym:
             symbols.append(sym)
     return sorted(set(symbols))
 
@@ -96,10 +97,20 @@ def get_universe(watchlist: str | None = None,
     """
     sources = []
 
-    # 1) Dhan scrip master (images host, browser headers)
+    # 0) explicit watchlist wins - user's choice is final
+    if watchlist:
+        try:
+            with open(watchlist) as f:
+                syms = [ln.strip().upper() for ln in f
+                        if ln.strip() and not ln.strip().startswith("#")]
+            if syms:
+                sources.append((syms, f"watchlist ({len(syms)} syms)"))
+        except OSError:
+            pass
+
+    # 1) Dhan scrip master (compact CSV, images host, browser headers)
     for url in (
-        "https://images.dhan.co/api-data/api-scrip-master/ScripMaster_NSE.csv",
-        "https://images.dhan.co/api-data/api-scrip-master/ScripMaster.csv",
+        "https://images.dhan.co/api-data/api-scrip-master.csv",
     ):
         try:
             r = requests.get(url, headers=_BROWSER_HEADERS, timeout=timeout)
@@ -137,17 +148,6 @@ def get_universe(watchlist: str | None = None,
                 sources.append((syms, f"github-mirror ({len(syms)} syms)"))
     except requests.RequestException:
         pass
-
-    # 4) watchlist file (if given)
-    if watchlist:
-        try:
-            with open(watchlist) as f:
-                syms = [ln.strip().upper() for ln in f
-                        if ln.strip() and not ln.strip().startswith("#")]
-            if syms:
-                sources.append((syms, f"watchlist ({len(syms)} syms)"))
-        except OSError:
-            pass
 
     # 5) hard-coded fallback (never empty)
     sources.append((FALLBACK_SYMBOLS, f"fallback ({len(FALLBACK_SYMBOLS)} syms)"))

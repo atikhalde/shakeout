@@ -249,6 +249,35 @@ python3 scanner.py --mode live --intraday --watchlist watchlist.txt --telegram -
 ```
 or use the workflow's manual "Run workflow" with **test_only = true**.
 
+
+## 🔧 Dhan API fixes (important — was returning 146 errors)
+
+The original client used wrong endpoints/params, so every symbol fetch failed
+with HTTP 400/404 and the scan silently reported "0 signals, N errors". Fixed
+by matching the official `dhanhq` client:
+
+| Before (broken) | After (working) |
+|---|---|
+| GET `/v2/instruments` (404) | GET `https://images.dhan.co/api-data/api-scrip-master.csv` (compact master, ~25 MB) |
+| segment filter `NSE_EQ` (0 rows) | NSE equities = `SEM_EXM_EXCH_ID=='NSE'` + `SEM_SEGMENT=='E'` + no expiry → **9,653 symbols** |
+| GET `/v2/charts/historical` with `symbol=` (400) | **POST** `/v2/charts/historical` with `securityId`, `exchangeSegment`, `instrument`, `expiryCode`, `oi`, `fromDate`, `toDate`, `dhanClientId` |
+| `instrumentType=1` | `instrument="EQUITY"` + `expiryCode=0` |
+
+Plus:
+- **Bundled instrument map** — `data/instruments_map.csv` (9,653 symbols →
+  security IDs) is committed to the repo, so GitHub Actions never depends on
+  reaching Dhan's Cloudflare-protected master download. Refresh it weekly:
+  `python -c "from dhan_client import DhanClient; DhanClient('x').get_instruments(force_refresh=True)"`
+- **Liquid-universe filter** — the full-market scan iterates ~3,250 real
+  equities (bonds/SGBs/T-bills/test scrips excluded) via
+  `client.liquid_universe()`.
+- **Rate limit** — 0.25 s between calls (Dhan allows 5 data requests/sec).
+- **Symbol alias** — `SPR_AUTO` → `SHRIPISTON` (old exchange symbol) resolves
+  automatically.
+
+> How to tell it's healthy: the scan log should now print
+> `instrument map: 9653 NSE equities` and `scanned ~3250 symbols, X signals, 0 errors`.
+
 ## 📦 GitHub setup
 
 The folder is ready to push as-is:

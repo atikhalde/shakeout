@@ -84,14 +84,12 @@ def test_universe() -> None:
     print("== universe resolution (never hard-fails) ==")
     from universes import get_universe, FALLBACK_SYMBOLS
 
-    syms, src = get_universe()  # no watchlist, no network guarantee
+    syms, src = get_universe()  # no watchlist: dhan master or fallback
     check("universe never empty", len(syms) > 0, f"got {len(syms)}")
-    check("universe source is fallback when offline",
-          "fallback" in src)
     check("fallback includes the demo stocks",
           all(s in FALLBACK_SYMBOLS for s in ("SPORTKING", "BAJFINANCE", "SPR_AUTO")))
 
-    # watchlist path
+    # watchlist path - explicit watchlist must win over any network source
     import tempfile, os
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write("# comment\nSPORTKING\n\nbajfinance\n")
@@ -133,26 +131,33 @@ def test_intraday() -> None:
         def json(self): return self._p
 
     client = DhanClient("fake", min_interval=0.0)
-    client._get = lambda path, params: FakeResp([
+    # resolve_symbol uses the bundled repo map (no network), so use a real
+    # symbol from the map and stub _post for the intraday payload
+    client._post = lambda path, payload: FakeResp([
         [1750000000000, 100.0, 105.0, 99.0, 102.0, 1000],
         [1750000060000, 102.0, 106.0, 100.0, 104.0, 1200],
     ])
-    rows = client.get_intraday("TEST", dt.date(2026, 7, 31))
+    rows = client.get_intraday("RELIANCE", dt.date(2026, 7, 31))
     check("intraday rows parsed", rows is not None and len(rows) == 2)
     check("intraday row ohlc", rows[1]["high"] == 106.0 and rows[1]["close"] == 104.0)
 
-    client._get = lambda path, params: FakeResp([
+    client._post = lambda path, payload: FakeResp([
         [1750000000000, 100.0, 105.0, 99.0, 102.0, 1000],
         [1750000060000, 102.0, 106.0, 100.0, 104.0, 1200],
     ])
-    p = client.intraday_partial("TEST", dt.date(2026, 7, 31))
+    p = client.intraday_partial("RELIANCE", dt.date(2026, 7, 31))
     check("partial aggregated", p is not None and p["open"] == 100.0
           and p["high"] == 106.0 and p["low"] == 99.0
           and p["close"] == 104.0 and p["volume"] == 2200)
 
-    client._get = lambda path, params: FakeResp([])
-    p2 = client.intraday_partial("TEST", dt.date(2026, 8, 1))
+    client._post = lambda path, payload: FakeResp([])
+    p2 = client.intraday_partial("RELIANCE", dt.date(2026, 8, 1))
     check("no data -> None", p2 is None)
+
+    # ---- get_instruments works from the bundled repo map (no network) ----
+    m = client.get_instruments()
+    check("instruments from repo map", len(m) > 9000, f"got {len(m)}")
+    check("symbol alias resolves", client.resolve_symbol("SPR_AUTO") is not None)
 
 
 def test_negatives() -> None:

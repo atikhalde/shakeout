@@ -69,6 +69,7 @@ class ScanConfig:
     score_threshold: float = 55.0    # min score to report
 
     # ---------------------------------------------------------------- live
-    request_interval: float = 0.15   # seconds between Dhan API calls (rate limit)
+    request_interval: float = 0.25   # seconds between Dhan API calls
+                                     # (Dhan data APIs allow 5 req/sec)
     max_workers: int = 4
     api_timeout: float = 20.0

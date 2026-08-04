@@ -1,18 +1,23 @@
 """
-Minimal Dhan API v2 client for the scanner.
+Minimal Dhan API v2 client for the scanner - CORRECT endpoint format.
 
-Docs:  https://dhanhq.co/docs/v2/
-Auth:  create an app at Dhan -> Settings -> API, then use the access token.
+Verified against the official dhanhq 2.2.0 Python client:
 
-Headers used:  `access-token` (required) and `client-id` (set if provided).
+  * Scrip master  : GET  https://images.dhan.co/api-data/api-scrip-master.csv
+                    (compact, ~25 MB, contains SEM_SMST_SECURITY_ID and
+                     SEM_TRADING_SYMBOL; NSE equities = SEM_EXM_EXCH_ID=='NSE'
+                     & SEM_SEGMENT=='E' & no expiry date)
+  * Historical    : POST https://api.dhan.co/v2/charts/historical
+                    form-encoded JSON body with securityId, exchangeSegment,
+                    instrument, expiryCode, oi, fromDate, toDate, dhanClientId
+  * Intraday      : POST https://api.dhan.co/v2/charts/intraday
+                    (same params + interval)
+  * Auth headers  : access-token + client-id (both required)
 
-Endpoints used:
-  GET /v2/instruments?exchangeSegment=NSE_EQ          -> CSV of all NSE symbols
-  GET /v2/charts/historical?symbol=<SYM>&exchangeSegment=NSE_EQ
-        &instrumentType=1&fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD -> daily OHLC
+Responses: {"data": {"open": [...], "high": [...], ...}} (columnar arrays).
 
-Daily bars are cached to CSV files under <cache_dir> so re-runs are fast and
-the number of API calls (and the chance of hitting rate limits) is minimal.
+Daily bars are cached to CSV files under <cache_dir>; the instrument map is
+cached under <cache_dir>/instruments_map.csv and refreshed daily.
 """
 
 from __future__ import annotations
@@ -27,46 +32,55 @@ from typing import Optional
 
 import requests
 
+MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 BASE_URL = "https://api.dhan.co"
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 "
+                   "Safari/537.36"),
+    "Referer": "https://dhanhq.co/",
+}
+
+# TradingView-style symbols that differ from the exchange master symbol
+SYMBOL_ALIASES = {
+    "SPR_AUTO": "SHRIPISTON",   # Shriram Pistons renamed to SPR Auto
+}
 
 
 class DhanClient:
     def __init__(self, token: str, client_id: Optional[str] = None,
                  cache_dir: str = "data/cache",
-                 min_interval: float = 0.15, timeout: float = 20.0,
+                 min_interval: float = 0.15, timeout: float = 25.0,
                  max_retries: int = 3):
         self.token = token
-        self.client_id = client_id
+        self.client_id = client_id or ""
         self.cache_dir = cache_dir
         self.min_interval = min_interval
         self.timeout = timeout
         self.max_retries = max_retries
         self._last_call = 0.0
         self._lock = threading.Lock()
+        self._instruments: Optional[dict[str, str]] = None
         os.makedirs(cache_dir, exist_ok=True)
 
     # ------------------------------------------------------------------ http
-    def _get(self, path: str, params: dict) -> requests.Response:
+    def _post(self, path: str, payload: dict) -> requests.Response:
         headers = {
             "access-token": self.token,
-            "Accept": "application/json, text/csv",
+            "client-id": self.client_id,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
         }
-        if self.client_id:
-            headers["client-id"] = self.client_id
-
         with self._lock:
             wait = self.min_interval - (time.time() - self._last_call)
             if wait > 0:
                 time.sleep(wait)
             self._last_call = time.time()
-
         last_err = None
         for attempt in range(self.max_retries):
             try:
-                r = requests.get(
-                    BASE_URL + path, params=params, headers=headers,
-                    timeout=self.timeout,
-                )
+                r = requests.post(BASE_URL + path, json=payload,
+                                  headers=headers, timeout=self.timeout)
                 if r.status_code in (429, 500, 502, 503, 504) and attempt < self.max_retries - 1:
                     time.sleep(1.5 * (attempt + 1))
                     continue
@@ -78,64 +92,162 @@ class DhanClient:
         raise last_err if last_err else RuntimeError("request failed")
 
     # ------------------------------------------------------------ instruments
-    def get_nse_equity_symbols(self) -> list[str]:
+    def get_instruments(self, force_refresh: bool = False) -> dict[str, str]:
         """
-        Full NSE equity universe from Dhan's instrument master CSV.
-        Dhan's scrip master is served from images.dhan.co (NOT the api host).
-        Returns plain trading symbols, e.g. ['RELIANCE', 'TCS', ...].
+        Return {TRADING_SYMBOL: security_id} for all NSE equity instruments.
+        Downloads Dhan's compact scrip master (or reads the local cache) and
+        caches the parsed map to <cache_dir>/instruments_map.csv (refreshed
+        daily). Raises RuntimeError only if every source fails.
         """
-        candidates = [
-            "https://images.dhan.co/api-data/api-scrip-master/ScripMaster_NSE.csv",
-            "https://images.dhan.co/api-data/api-scrip-master/ScripMaster.csv",
-        ]
-        last_err = None
-        for url in candidates:
-            try:
-                r = requests.get(url, timeout=self.timeout)
-                if r.status_code != 200:
-                    last_err = f"HTTP {r.status_code} for {url}"
-                    continue
-                r.encoding = "utf-8"
-                symbols = []
-                reader = csv.DictReader(io.StringIO(r.text))
-                for row in reader:
-                    seg = (row.get("SEM_SEGMENT") or "").strip()
-                    expiry = (row.get("SEM_EXPIRY_DATE") or "").strip()
-                    if seg != "NSE_EQ" or expiry:
-                        continue
-                    sym = (row.get("SEM_TRADING_SYMBOL") or
-                           row.get("SEM_INSTRUMENT_NAME") or "").strip()
-                    if sym and not any(ch.isdigit() for ch in sym.split()[-1:]):
-                        symbols.append(sym)
-                if symbols:
-                    return sorted(set(symbols))
-                last_err = f"empty list from {url}"
-            except requests.RequestException as e:  # noqa: BLE001
-                last_err = f"{e} for {url}"
-        raise RuntimeError(f"instrument master fetch failed: {last_err}")
+        if self._instruments is not None and not force_refresh:
+            return self._instruments
+
+        map_path = os.path.join(self.cache_dir, "instruments_map.csv")
+        repo_map = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "data", "instruments_map.csv")
+        # if we are running from the repo root, data/ sits next to us
+        if not os.path.exists(repo_map):
+            repo_map = os.path.join(os.getcwd(), "data", "instruments_map.csv")
+
+        # 1) repo-bundled map (checked out from git) - always reliable
+        if not force_refresh and os.path.exists(repo_map):
+            m = self._read_map_cache(repo_map)
+            if m:
+                self._instruments = m
+                self._write_map_cache(map_path, m)   # warm the fast cache
+                return m
+
+        # 2) cached map, fresh (< 1 day old)
+        if not force_refresh and os.path.exists(map_path):
+            age = time.time() - os.path.getmtime(map_path)
+            if age < 24 * 3600:
+                m = self._read_map_cache(map_path)
+                if m:
+                    self._instruments = m
+                    return m
+
+        # 3) download the compact master
+        raw_path = os.path.join(self.cache_dir, "scrip_master.csv")
+        try:
+            r = requests.get(MASTER_URL, headers=BROWSER_HEADERS,
+                             timeout=self.timeout)
+            if r.status_code == 200 and r.text.strip():
+                with open(raw_path, "wb") as f:
+                    f.write(r.content)
+                m = self._parse_master(r.text)
+                if m:
+                    self._write_map_cache(map_path, m)
+                    self._instruments = m
+                    return m
+        except requests.RequestException:
+            pass
+
+        # 4) stale cache as last resort
+        if os.path.exists(map_path):
+            m = self._read_map_cache(map_path)
+            if m:
+                self._instruments = m
+                return m
+
+        raise RuntimeError("could not fetch Dhan instrument master "
+                           "(Cloudflare may block this IP)")
+
+    @staticmethod
+    def _parse_master(text: str) -> dict[str, str]:
+        """Parse the compact scrip master -> {SYMBOL: security_id}."""
+        out: dict[str, str] = {}
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            exch = (row.get("SEM_EXM_EXCH_ID") or "").strip()
+            seg = (row.get("SEM_SEGMENT") or "").strip()
+            expiry = (row.get("SEM_EXPIRY_DATE") or "").strip()
+            if exch != "NSE" or seg != "E" or expiry:
+                continue
+            sym = (row.get("SEM_TRADING_SYMBOL") or "").strip()
+            sid = (row.get("SEM_SMST_SECURITY_ID") or "").strip()
+            if sym and sid:
+                out[sym] = sid
+        return out
+
+    @staticmethod
+    def _read_map_cache(path: str) -> dict[str, str]:
+        try:
+            with open(path, newline="") as f:
+                return {r["symbol"]: r["security_id"] for r in csv.DictReader(f)}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    @staticmethod
+    def _write_map_cache(path: str, m: dict[str, str]) -> None:
+        try:
+            with open(path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["symbol", "security_id"])
+                for sym, sid in m.items():
+                    w.writerow([sym, sid])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def resolve_symbol(self, symbol: str) -> Optional[str]:
+        """Map a (possibly alias) trading symbol to a Dhan security id."""
+        sym = symbol.upper().strip()
+        sym = SYMBOL_ALIASES.get(sym, sym)
+        try:
+            m = self.get_instruments()
+        except RuntimeError:
+            return None
+        return m.get(sym)
+
+    def liquid_universe(self) -> list[str]:
+        """
+        Symbols of real tradable equities (drops bonds, SGBs, T-bills, test
+        scrips, etc.) - what a full-market scan should iterate.
+        """
+        import re
+        try:
+            m = self.get_instruments()
+        except RuntimeError:
+            return []
+
+        def is_junk(s: str) -> bool:
+            if len(s) > 1 and re.search(r"[0-9]", s[1:]):
+                return True
+            if any(k in s for k in ("SGB", "GS20", "GS30", "NSETEST",
+                                    "INVIT", "BEES", "GILT", "TBIL")):
+                return True
+            return False
+
+        return sorted(s for s in m if not is_junk(s))
 
     # ----------------------------------------------------------------- OHLC
     def get_daily(self, symbol: str, from_date: dt.date, to_date: dt.date,
                   force_refresh: bool = False) -> Optional[dict]:
         """
         Daily bars for `symbol` between from_date..to_date (inclusive).
-        Returns dict with 'symbol', 'dates', 'open','high','low','close','volume'
-        (oldest -> newest) or None if no data / invalid symbol.
+        Returns dict with 'symbol', 'dates', 'open','high','low','close',
+        'volume' (oldest -> newest) or None if no data / unknown symbol.
         """
-        cache_file = os.path.join(self.cache_dir, f"{symbol}.csv")
+        security_id = self.resolve_symbol(symbol)
+        if security_id is None:
+            return None
 
+        cache_file = os.path.join(self.cache_dir, f"{symbol}.csv")
         if not force_refresh and os.path.exists(cache_file):
             bars = self._read_cache(cache_file)
-            if bars and bars["dates"] and bars["dates"][-1] >= to_date:
+            if bars and bars["dates"] and bars["dates"][-1] >= to_date.isoformat():
                 return self._slice(bars, from_date, to_date)
 
-        r = self._get("/v2/charts/historical", {
-            "symbol": symbol,
+        payload = {
+            "securityId": security_id,
             "exchangeSegment": "NSE_EQ",
-            "instrumentType": "1",   # 1 = equity
+            "instrument": "EQUITY",
+            "expiryCode": 0,
+            "oi": False,
             "fromDate": from_date.isoformat(),
             "toDate": to_date.isoformat(),
-        })
+            "dhanClientId": self.client_id,
+        }
+        r = self._post("/v2/charts/historical", payload)
         bars = self._parse_ohlc(r)
         if bars is None:
             return None
@@ -147,25 +259,30 @@ class DhanClient:
     def get_intraday(self, symbol: str, date: dt.date,
                      interval_minutes: int = 15) -> Optional[list]:
         """
-        Intraday candles for `symbol` on `date` via Dhan /v2/charts/intraday.
-        Returns a list of dicts {ts, open, high, low, close, volume}
+        Intraday candles for `symbol` on `date` via POST /v2/charts/intraday.
+        Returns list of dicts {ts, open, high, low, close, volume}
         (oldest -> newest) or None if no data / error.
         """
-        r = self._get("/v2/charts/intraday", {
-            "symbol": symbol,
+        security_id = self.resolve_symbol(symbol)
+        if security_id is None:
+            return None
+        payload = {
+            "securityId": security_id,
             "exchangeSegment": "NSE_EQ",
-            "instrumentType": "1",
-            "interval": str(interval_minutes),
+            "instrument": "EQUITY",
+            "interval": interval_minutes,
+            "oi": False,
             "fromDate": date.isoformat(),
             "toDate": date.isoformat(),
-        })
+            "dhanClientId": self.client_id,
+        }
+        r = self._post("/v2/charts/intraday", payload)
         try:
             data = r.json()
         except Exception:  # noqa: BLE001
             return None
         if isinstance(data, dict):
             data = data.get("data", data)
-
         rows = []
         if isinstance(data, list):
             for row in data:
@@ -181,7 +298,6 @@ class DhanClient:
                             "volume": float(row.get("volume", 0) or 0),
                         })
                     else:
-                        # Dhan often returns [timestamp, open, high, low, close, volume]
                         if len(row) < 5:
                             continue
                         rows.append({
@@ -201,11 +317,6 @@ class DhanClient:
 
     def intraday_partial(self, symbol: str, date: dt.date,
                          interval_minutes: int = 15) -> Optional[dict]:
-        """
-        Aggregate today's intraday candles (so far) into ONE partial daily
-        candle: {open, high, low, close, volume}.
-        Returns None if the market has no data for that date yet.
-        """
         rows = self.get_intraday(symbol, date, interval_minutes)
         if not rows:
             return None
@@ -219,53 +330,44 @@ class DhanClient:
 
     # ------------------------------------------------------------- parsing
     def _parse_ohlc(self, r: requests.Response) -> Optional[dict]:
-        """Tolerant parser: Dhan may return columnar JSON or a row list."""
-        data = r.json()
+        """Tolerant parser for the columnar JSON shape Dhan returns."""
+        try:
+            data = r.json()
+        except Exception:  # noqa: BLE001
+            return None
         if isinstance(data, dict):
             inner = data.get("data") if isinstance(data.get("data"), (dict, list)) else data
         else:
             inner = data
 
-        if isinstance(inner, dict):
-            keys = ("open", "high", "low", "close", "volume", "timestamp")
-            if all(k in inner for k in keys):
-                return {
-                    "dates": [str(x)[:10] for x in inner["timestamp"]],
-                    "open": inner["open"], "high": inner["high"],
-                    "low": inner["low"], "close": inner["close"],
-                    "volume": inner.get("volume", [0] * len(inner["close"])),
-                }
-            # nested: {'data': {'open': [...], ...}}
-            if "open" in inner and "close" in inner:
-                keys = ("open", "high", "low", "close", "volume")
-                ts = inner.get("timestamp") or inner.get("date") or inner.get("dates")
-                if not ts:
-                    return None
-                return {
-                    "dates": [str(x)[:10] for x in ts],
-                    "open": inner["open"], "high": inner["high"],
-                    "low": inner["low"], "close": inner["close"],
-                    "volume": inner.get("volume", [0] * len(inner["close"])),
-                }
+        if isinstance(inner, dict) and "close" in inner and "open" in inner:
+            ts = (inner.get("timestamp") or inner.get("date")
+                  or inner.get("dates"))
+            if not ts:
+                return None
+            return {
+                "dates": [str(x)[:10] for x in ts],
+                "open": inner["open"], "high": inner["high"],
+                "low": inner["low"], "close": inner["close"],
+                "volume": inner.get("volume", [0] * len(inner["close"])),
+            }
 
         if isinstance(inner, list) and inner and isinstance(inner[0], dict):
-            row0 = inner[0]
-            if all(k in row0 for k in ("open", "high", "low", "close")):
-                rows = []
-                for row in inner:
-                    try:
-                        rows.append({
-                            "dates": str(row.get("timestamp") or row.get("date"))[:10],
-                            "open": float(row["open"]), "high": float(row["high"]),
-                            "low": float(row["low"]), "close": float(row["close"]),
-                            "volume": float(row.get("volume", 0) or 0),
-                        })
-                    except (TypeError, ValueError, KeyError):
-                        continue
-                if rows:
-                    rows.sort(key=lambda x: x["dates"])
-                    return {k: [x[k] for x in rows] for k in
-                            ("dates", "open", "high", "low", "close", "volume")}
+            rows = []
+            for row in inner:
+                try:
+                    rows.append({
+                        "dates": str(row.get("timestamp") or row.get("date"))[:10],
+                        "open": float(row["open"]), "high": float(row["high"]),
+                        "low": float(row["low"]), "close": float(row["close"]),
+                        "volume": float(row.get("volume", 0) or 0),
+                    })
+                except (TypeError, ValueError, KeyError):
+                    continue
+            if rows:
+                rows.sort(key=lambda x: x["dates"])
+                return {k: [x[k] for x in rows] for k in
+                        ("dates", "open", "high", "low", "close", "volume")}
         return None
 
     # ------------------------------------------------------------- caching
@@ -284,7 +386,7 @@ class DhanClient:
                 "close": [float(r["close"]) for r in rows],
                 "volume": [float(r.get("volume", 0) or 0) for r in rows],
             }
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     @staticmethod
@@ -296,7 +398,7 @@ class DhanClient:
                 for i in range(len(bars["dates"])):
                     w.writerow([bars["dates"][i], bars["open"][i], bars["high"][i],
                                 bars["low"][i], bars["close"][i], bars["volume"][i]])
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     @staticmethod
@@ -313,10 +415,6 @@ class DhanClient:
         return {k: (v[lo:hi] if isinstance(v, list) else v)
                 for k, v in bars.items()}
 
-
-# --------------------------------------------------------------------------
-# token helpers
-# --------------------------------------------------------------------------
 
 def token_from_env() -> tuple[Optional[str], Optional[str]]:
     return (os.environ.get("DHAN_ACCESS_TOKEN"),

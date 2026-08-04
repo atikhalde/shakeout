@@ -191,20 +191,36 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                         min_interval=cfg.request_interval,
                         timeout=cfg.api_timeout)
 
-    # ---- universe: layered sources, NEVER hard-fails ----
+    # ---- universe: Dhan instrument map first, watchlist/fallback otherwise ----
+    try:
+        instruments = client.get_instruments()
+        print(f"instrument map: {len(instruments)} NSE equities")
+    except Exception as e:  # noqa: BLE001
+        instruments = {}
+        print(f"WARNING: instrument map unavailable ({e}); "
+              f"falling back to watchlist/static list", file=sys.stderr)
+
     if watchlist:
-        # explicit watchlist -> use it directly (user's choice)
         with open(watchlist) as f:
             symbols = [ln.strip().upper() for ln in f if ln.strip()
                        and not ln.strip().startswith("#")]
         source = f"watchlist ({len(symbols)} syms)"
         print(f"universe: {source}")
+    elif instruments:
+        symbols = client.liquid_universe() or sorted(instruments.keys())
+        source = f"dhan-instruments ({len(symbols)} syms)"
+        print(f"universe: {source}")
     else:
         symbols, source = get_universe()
         print(f"universe: {source}")
-        if limit:
-            symbols = symbols[:limit]
-            print(f"limit: scanning first {limit} symbols")
+        # only keep symbols we can resolve (need a security id)
+        if not instruments:
+            resolved = [s for s in symbols if client.resolve_symbol(s)]
+            print(f"  -> {len(resolved)} symbols resolvable via instrument map")
+            symbols = resolved
+    if limit:
+        symbols = symbols[:limit]
+        print(f"limit: scanning first {limit} symbols")
 
     to_date = dt.date.today()
     from_date = to_date - dt.timedelta(days=from_days)
