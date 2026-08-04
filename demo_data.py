@@ -109,7 +109,7 @@ def _sportking():
         (196.81, 210.05, 196.81, 201.44, 2_600_000),   # 31-Jul  REVERSAL <- SIGNAL
     ]
     pre = _concat(_pre_history(60, 180, 215.6, rng, 0.015, max_cap=215.6),
-                  _pre_history(60, 215.6, 150, rng, 0.020),
+                  _pre_history(60, 215.6, 150, rng, 0.020, max_cap=215.6),
                   _pre_history(30, 150, 193, rng, 0.010),
                   _rows(base))
     dates, bars = _finalize("SPORTKING", pre, _rows(run), "2026-07-31")
@@ -139,7 +139,7 @@ def _bajfinance():
         (1026.6, 1049.9, 1026.6, 1048.1, 3_800_000),   # 27-Jul REVERSAL <- SIGNAL
     ]
     pre = _concat(_pre_history(80, 980, 1074, rng, 0.010, max_cap=1075),
-                  _pre_history(60, 1074, 950, rng, 0.016),
+                  _pre_history(60, 1074, 950, rng, 0.016, max_cap=1075),
                   _pre_history(15, 950, 1000, rng, 0.006),
                   _rows(base))
     dates, bars = _finalize("BAJFINANCE", pre, _rows(run), "2026-07-27")
@@ -169,7 +169,7 @@ def _spr_auto():
         (4169.0, 4281.0, 4169.0, 4241.0, 590_000),     # 27-Jul REVERSAL <- SIGNAL
     ]
     pre = _concat(_pre_history(80, 3800, 4523, rng, 0.012, max_cap=4525),
-                  _pre_history(60, 4523, 3600, rng, 0.018),
+                  _pre_history(60, 4523, 3600, rng, 0.018, max_cap=4525),
                   _pre_history(15, 3600, 4050, rng, 0.006),
                   _rows(base))
     dates, bars = _finalize("SPR_AUTO", pre, _rows(run), "2026-07-27")
@@ -234,7 +234,7 @@ def _neg_post_move():
     rng = np.random.default_rng(77)
     base = [(195.0, 197.5, 194.4, 196.5, 900_000)] * 10
     pre = _concat(_pre_history(60, 180, 215.6, rng, 0.015, max_cap=215.6),
-                  _pre_history(60, 215.6, 150, rng, 0.020),
+                  _pre_history(60, 215.6, 150, rng, 0.020, max_cap=215.6),
                   _pre_history(30, 150, 193, rng, 0.010),
                   _rows(base))
     rows = [
@@ -256,7 +256,7 @@ def _neg_still_falling():
     rng = np.random.default_rng(88)
     base = [(195.0, 197.5, 194.4, 196.5, 900_000)] * 10
     pre = _concat(_pre_history(60, 180, 215.6, rng, 0.015, max_cap=215.6),
-                  _pre_history(60, 215.6, 150, rng, 0.020),
+                  _pre_history(60, 215.6, 150, rng, 0.020, max_cap=215.6),
                   _pre_history(30, 150, 193, rng, 0.010),
                   _rows(base))
     rows = [
@@ -276,7 +276,7 @@ def _neg_shallow_pullback():
     rng = np.random.default_rng(99)
     base = [(195.0, 197.5, 194.4, 196.5, 900_000)] * 10
     pre = _concat(_pre_history(60, 180, 215.6, rng, 0.015, max_cap=215.6),
-                  _pre_history(60, 215.6, 150, rng, 0.020),
+                  _pre_history(60, 215.6, 150, rng, 0.020, max_cap=215.6),
                   _pre_history(30, 150, 193, rng, 0.010),
                   _rows(base))
     rows = [
@@ -296,7 +296,7 @@ def _neg_shallow_pullback():
 def _neg_stale_bos():
     rng = np.random.default_rng(100)
     pre = _concat(_pre_history(60, 180, 215.6, rng, 0.015, max_cap=215.6),
-                  _pre_history(60, 215.6, 150, rng, 0.020),
+                  _pre_history(60, 215.6, 150, rng, 0.020, max_cap=215.6),
                   _pre_history(30, 150, 193, rng, 0.010))
     rows = [
         (210.0, 219.0, 209.0, 215.5, 1_400_000),   # BOS 14 bars before end

@@ -97,6 +97,16 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
         return None
     bos_day, bos_style, break_level = bos
 
+    # 1b) swing-style BOS must at least REACH the 26-week high zone
+    #     (prevents false positives like ACI, which broke a 45-day swing
+    #      high but peaked at only ~95% of its 26-week high)
+    if bos_style == "swing":
+        h26w = _prev_highs(h, cfg.bos_lookback_26w)[t]
+        if not np.isnan(h26w) and h26w > 0:
+            post_bos_peak = float(np.max(h[bos_day: t + 1]))
+            if post_bos_peak < h26w * cfg.swing_26w_proximity:
+                return None
+
     # ------------------------------------------------------------- 2. flush
     peak_day = int(np.argmax(h[bos_day: t + 1])) + bos_day
     flush_day = int(np.argmin(l[bos_day: t + 1])) + bos_day

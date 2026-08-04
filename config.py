@@ -46,6 +46,12 @@ class ScanConfig:
     bos_oldest: int = 12             # BOS must be no older than this many bars
     bos_newest: int = 2              # ... and at least this many bars before signal day
     bos_break_eps: float = 0.0       # break = high > prev_high * (1 + eps)
+    # For the 'swing' style: the post-BOS peak must reach at least this
+    # fraction of the 26-week high (otherwise it's just a swing break that
+    # never approached the real 26W-high level - e.g. ACI at 94.9%).
+    # The 3 verified stocks: SPORTKING 101.6%, BAJFINANCE 99.96%,
+    # SPR_AUTO 99.93% - all >= 97%.
+    swing_26w_proximity: float = 0.97
 
     # -------------------------------------------------------------- flush
     flush_min_drop: float = 0.04     # peak -> flush-low drawdown >= 4%

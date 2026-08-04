@@ -278,6 +278,35 @@ Plus:
 > How to tell it's healthy: the scan log should now print
 > `instrument map: 9653 NSE equities` and `scanned ~3250 symbols, X signals, 0 errors`.
 
+
+## 🔒 26-week-high proximity guard (false-positive fix)
+
+A **swing**-style BOS (45-day swing break) is only accepted when the post-BOS
+peak reaches **≥ 97%** of the 26-week high (`swing_26w_proximity = 0.97`).
+This rejects stocks that only broke a local swing high without ever
+approaching the real 26-week-high level.
+
+Verified against real data:
+| Stock | Peak vs 26W high | Verdict |
+|---|---|---|
+| SPORTKING | 101.6% | ✅ accepted |
+| BAJFINANCE | 99.96% | ✅ accepted |
+| SPR_AUTO | 99.93% | ✅ accepted |
+| ACI (real) | 94.9% | ❌ rejected (false positive) |
+
+## 🚫 ETF / fund exclusion
+
+Dhan marks ETFs with series `EQ` too, so they are excluded by name token
+(NIFTY, BEES, GOLD, SILVER, IETF, ETF, SETF, LIQUID, etc.) with a whitelist
+protecting real stocks (GOLDIAM, JETFREIGHT, ALPHAGEO, BALPHARMA). The
+full-market universe is now **~2,145 real equities** (was 3,253 incl. funds).
+
+## 📊 Score breakdown in alerts
+
+Every Telegram alert now shows **what the score rewards**:
+`BOS freshness 21/25 · Flush depth 20/20 · SSL precision 18/20 ·
+Reversal bounce 10/20 · Candle body 7/15 · Trend (EMA20/50) 5/5`
+
 ## 📦 GitHub setup
 
 The folder is ready to push as-is:

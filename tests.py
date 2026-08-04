@@ -13,7 +13,7 @@ import sys
 import numpy as np
 
 from config import ScanConfig
-from demo_data import demo_universe
+from demo_data import demo_universe, _dates_ending, _pre_history
 from indicators import ema, rolling_max
 from pattern import detect_setup
 from telegram_notifier import TelegramNotifier
@@ -193,6 +193,45 @@ def test_intraday() -> None:
     check("iso passthrough", _iso_date("2026-07-31") == "2026-07-31")
 
 
+def test_aci_26w_proximity() -> None:
+    """ACI (real data) broke only a 45-day swing high - never reached its
+    26-week high (94.9%) -> must be rejected by the proximity guard."""
+    print("== ACI 26-week-high proximity (real data regression) ==")
+    import os
+    from pattern import detect_setup
+    from config import ScanConfig
+
+    # build a synthetic ACI-like series: old high 636 (26W), rally peaks at
+    # ~604 (95%), flush to ~518 shelf, bounce - but peak never >= 97% of 26W
+    rng = np.random.default_rng(123)
+    n = 200
+    # old 26W high ~636 made 40 bars ago, then decline to ~520 base
+    seg1 = _pre_history(80, 500, 636, rng, 0.012, max_cap=637)
+    seg2 = _pre_history(80, 636, 520, rng, 0.014, max_cap=637)
+    seg3 = _pre_history(40, 520, 560, rng, 0.010)   # rally but capped below 636*0.97
+    o = np.concatenate([seg1[0], seg2[0], seg3[0]])
+    h = np.concatenate([seg1[1], seg2[1], seg3[1]])
+    l = np.concatenate([seg1[2], seg2[2], seg3[2]])
+    c = np.concatenate([seg1[3], seg2[3], seg3[3]])
+    v = np.concatenate([seg1[4], seg2[4], seg3[4]])
+    dates = _dates_ending("2026-08-04", n)
+    bars = {"open": o, "high": h, "low": l, "close": c,
+            "volume": v, "symbol": "ACI_LIKE"}
+
+    sig = detect_setup(bars, dates, ScanConfig())
+    check("ACI-like rejected (peak < 97% of 26W high)",
+          sig is None, f"unexpected signal {sig['signal_date'] if sig else ''}")
+
+    # the 3 verified positives still pass
+    from demo_data import demo_universe
+    uni = demo_universe()
+    for s in ("SPORTKING", "BAJFINANCE", "SPR_AUTO"):
+        d, b, exp = uni[s]
+        sig = detect_setup(b, d, ScanConfig())
+        check(f"{s} still flagged with proximity guard",
+              sig is not None and sig["signal_date"] == exp)
+
+
 def test_negatives() -> None:
     print("== negative cases (must NOT flag) ==")
     cfg = ScanConfig()
@@ -226,6 +265,7 @@ def main() -> int:
     test_intraday()
     test_universe()
     test_positives()
+    test_aci_26w_proximity()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1
