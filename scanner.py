@@ -185,28 +185,26 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
              debug: bool, intraday: bool = False,
              notifier: TelegramNotifier | None = None) -> list[dict]:
     from dhan_client import DhanClient
+    from universes import get_universe
 
     client = DhanClient(token, client_id,
                         min_interval=cfg.request_interval,
                         timeout=cfg.api_timeout)
 
-    print("Fetching NSE instrument list ...")
-    try:
-        symbols = client.get_nse_equity_symbols()
-    except Exception as e:  # noqa: BLE001
-        print(f"ERROR: could not fetch the instrument list from Dhan: {e}\n"
-              "Check DHAN_ACCESS_TOKEN (and DHAN_CLIENT_ID) and your Dhan "
-              "API permissions.", file=sys.stderr)
-        return []
-    print(f"universe: {len(symbols)} symbols")
-
+    # ---- universe: layered sources, NEVER hard-fails ----
     if watchlist:
+        # explicit watchlist -> use it directly (user's choice)
         with open(watchlist) as f:
-            symbols = [ln.strip().upper() for ln in f if ln.strip()]
-        print(f"watchlist: {len(symbols)} symbols")
-    elif limit:
-        symbols = symbols[:limit]
-        print(f"limit: scanning first {limit} symbols")
+            symbols = [ln.strip().upper() for ln in f if ln.strip()
+                       and not ln.strip().startswith("#")]
+        source = f"watchlist ({len(symbols)} syms)"
+        print(f"universe: {source}")
+    else:
+        symbols, source = get_universe()
+        print(f"universe: {source}")
+        if limit:
+            symbols = symbols[:limit]
+            print(f"limit: scanning first {limit} symbols")
 
     to_date = dt.date.today()
     from_date = to_date - dt.timedelta(days=from_days)

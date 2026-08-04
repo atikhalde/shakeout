@@ -81,22 +81,38 @@ class DhanClient:
     def get_nse_equity_symbols(self) -> list[str]:
         """
         Full NSE equity universe from Dhan's instrument master CSV.
+        Dhan's scrip master is served from images.dhan.co (NOT the api host).
         Returns plain trading symbols, e.g. ['RELIANCE', 'TCS', ...].
         """
-        r = self._get("/v2/instruments", {"exchangeSegment": "NSE_EQ"})
-        r.encoding = "utf-8"
-        symbols = []
-        reader = csv.DictReader(io.StringIO(r.text))
-        for row in reader:
-            seg = (row.get("SEM_SEGMENT") or "").strip()
-            expiry = (row.get("SEM_EXPIRY_DATE") or "").strip()
-            if seg != "NSE_EQ" or expiry:
-                continue
-            sym = (row.get("SEM_TRADING_SYMBOL") or
-                   row.get("SEM_INSTRUMENT_NAME") or "").strip()
-            if sym and not any(ch.isdigit() for ch in sym.split()[-1:]):
-                symbols.append(sym)
-        return sorted(set(symbols))
+        candidates = [
+            "https://images.dhan.co/api-data/api-scrip-master/ScripMaster_NSE.csv",
+            "https://images.dhan.co/api-data/api-scrip-master/ScripMaster.csv",
+        ]
+        last_err = None
+        for url in candidates:
+            try:
+                r = requests.get(url, timeout=self.timeout)
+                if r.status_code != 200:
+                    last_err = f"HTTP {r.status_code} for {url}"
+                    continue
+                r.encoding = "utf-8"
+                symbols = []
+                reader = csv.DictReader(io.StringIO(r.text))
+                for row in reader:
+                    seg = (row.get("SEM_SEGMENT") or "").strip()
+                    expiry = (row.get("SEM_EXPIRY_DATE") or "").strip()
+                    if seg != "NSE_EQ" or expiry:
+                        continue
+                    sym = (row.get("SEM_TRADING_SYMBOL") or
+                           row.get("SEM_INSTRUMENT_NAME") or "").strip()
+                    if sym and not any(ch.isdigit() for ch in sym.split()[-1:]):
+                        symbols.append(sym)
+                if symbols:
+                    return sorted(set(symbols))
+                last_err = f"empty list from {url}"
+            except requests.RequestException as e:  # noqa: BLE001
+                last_err = f"{e} for {url}"
+        raise RuntimeError(f"instrument master fetch failed: {last_err}")
 
     # ----------------------------------------------------------------- OHLC
     def get_daily(self, symbol: str, from_date: dt.date, to_date: dt.date,

@@ -80,6 +80,28 @@ def test_telegram_format() -> None:
     check("summary without signals", "No pattern signals" in summary0)
 
 
+def test_universe() -> None:
+    print("== universe resolution (never hard-fails) ==")
+    from universes import get_universe, FALLBACK_SYMBOLS
+
+    syms, src = get_universe()  # no watchlist, no network guarantee
+    check("universe never empty", len(syms) > 0, f"got {len(syms)}")
+    check("universe source is fallback when offline",
+          "fallback" in src)
+    check("fallback includes the demo stocks",
+          all(s in FALLBACK_SYMBOLS for s in ("SPORTKING", "BAJFINANCE", "SPR_AUTO")))
+
+    # watchlist path
+    import tempfile, os
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("# comment\nSPORTKING\n\nbajfinance\n")
+        wl = f.name
+    syms2, src2 = get_universe(watchlist=wl)
+    os.unlink(wl)
+    check("watchlist read", syms2 == ["SPORTKING", "BAJFINANCE"], f"{syms2}")
+    check("watchlist source label", "watchlist" in src2)
+
+
 def test_intraday() -> None:
     print("== intraday (live market) logic ==")
     import datetime as dt
@@ -164,6 +186,7 @@ def main() -> int:
     test_indicators()
     test_telegram_format()
     test_intraday()
+    test_universe()
     test_positives()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")
