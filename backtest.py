@@ -26,7 +26,9 @@ Usage:
     pip install yfinance
     python backtest.py --source yfinance --years 2 --limit 100
 
-Output: signals_backtest.csv (every signal + forward returns) and a
+Output: signals_backtest.csv + signals_backtest.xlsx (Excel with a
+        'Signals' sheet containing EVERY signal incl. full score component
+        breakdown, and a 'Summary' sheet with win-rate stats + score buckets) and a
         printed win-rate summary, including a score>=70 vs score<70 split.
 """
 
@@ -214,7 +216,6 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         score, _parts = _score(sig_tmp, {"close": c[:t + 1]}, cfg)
         if score < cfg.score_threshold:
             continue
-
         # ------------------- forward returns (next open) ---------------
         entry = o[t + 1]
         if entry <= 0:
@@ -229,11 +230,19 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         # gains >= 8% from entry (the alert's "big move not fired yet")
         big_move = 1 if max15 >= cfg.big_move_pct else 0
 
+        # flatten the score components into the row (Excel shows all details)
+        comp = {name: round(v, 1) for name, (v, _m) in (_parts or {}).items()}
         out_rows.append({
             "symbol": sym, "date": dates[t], "close": round(float(c[t]), 2),
             "score": score, "bos": dates[bos_day], "style": bos_style,
             "peak": round(peak, 2), "flush_low": round(flush_low, 2),
             "ssl": round(ssl, 2),
+            "score_freshness": comp.get("BOS freshness", ""),
+            "score_flush": comp.get("Flush depth", ""),
+            "score_ssl": comp.get("SSL precision", ""),
+            "score_bounce": comp.get("Reversal bounce", ""),
+            "score_body": comp.get("Candle body", ""),
+            "score_trend": comp.get("Trend (EMA20/50)", ""),
             "r3": round(fwd.get("r3", float("nan")), 2),
             "r5": round(fwd.get("r5", float("nan")), 2),
             "r7": round(fwd.get("r7", float("nan")), 2),
@@ -302,6 +311,79 @@ def print_summary(rows: list[dict], errors: int, elapsed: float,
                   f"{(s7['win'] if s7 else 0):5.1f}%   "
                   f"{s5['avg']:+6.2f}%   {bm_s / len(sub) * 100:5.1f}%")
     print()
+
+
+# ---------------------------------------------------------------------------
+# Excel export (all scoring details)
+# ---------------------------------------------------------------------------
+
+def write_excel(rows: list[dict], path: str) -> None:
+    """Write signals to an .xlsx workbook: sheet 'Signals' (all columns)
+    + sheet 'Summary' (win-rate stats + score buckets)."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+    except ImportError:
+        print("openpyxl not installed - skipping Excel export "
+              "(pip install openpyxl)", file=sys.stderr)
+        return
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Signals"
+    fields = list(rows[0].keys())
+    hdr_fill = PatternFill("solid", fgColor="1F4E78")
+    hdr_font = Font(color="FFFFFF", bold=True)
+    ws.append(fields)
+    for c in ws[1]:
+        c.fill = hdr_fill
+        c.font = hdr_font
+    for r in rows:
+        ws.append([r.get(f, "") for f in fields])
+    # freeze header + autofilter
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    # column widths
+    for i, f in enumerate(fields, 1):
+        ws.column_dimensions[chr(64 + i) if i <= 26 else "A"].width = \
+            max(10, min(20, len(f) + 2))
+
+    # ---- Summary sheet ----
+    ws2 = wb.create_sheet("Summary")
+    ws2.append(["Backtest summary"])
+    ws2["A1"].font = Font(bold=True, size=13)
+    ws2.append(["signals", len(rows)])
+    labels = {"r3": "3 days", "r5": "5 days", "r7": "7 days",
+              "r10": "10 days", "r15": "15 days",
+              "max15": "best within 15d", "min15": "worst within 15d"}
+    ws2.append([])
+    ws2.append(["horizon", "n", "win%", "avg%", "med%"])
+    for k in ("r3", "r5", "r7", "r10", "r15", "max15", "min15"):
+        s = _stats(rows, k)
+        if s:
+            ws2.append([labels[k], s["n"], round(s["win"], 1),
+                        round(s["avg"], 2), round(s["med"], 2)])
+    bm = sum(1 for r in rows if r.get("big_move"))
+    ws2.append(["BIG MOVE >=+8%", bm, round(bm / len(rows) * 100, 1) if rows else 0])
+    ws2.append([])
+    ws2.append(["score bucket", "n", "5d-win%", "7d-win%", "5d-avg%", "big-move%"])
+    for thr in (50, 55, 60, 65, 70, 75, 80):
+        sub = [r for r in rows if r["score"] >= thr]
+        if len(sub) < 3:
+            continue
+        s5 = _stats(sub, "r5")
+        s7 = _stats(sub, "r7")
+        bm_s = sum(1 for r in sub if r.get("big_move"))
+        if s5:
+            ws2.append([f">= {thr}", len(sub), round(s5["win"], 1),
+                        round(s7["win"], 1) if s7 else "",
+                        round(s5["avg"], 2),
+                        round(bm_s / len(sub) * 100, 1)])
+    for i, f in enumerate("ABCDEF", 1):
+        ws2.column_dimensions[f].width = 12
+
+    wb.save(path)
+    print(f"wrote Excel -> {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +481,9 @@ def main() -> int:
             w.writeheader()
             w.writerows(rows)
         print(f"\nwrote {len(rows)} signals -> {args.out}")
+        # also write Excel with full scoring details
+        xlsx = os.path.splitext(args.out)[0] + ".xlsx"
+        write_excel(rows, xlsx)
 
     print_summary(rows, errors, time.time() - t0, cfg)
     return 0
