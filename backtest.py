@@ -45,6 +45,7 @@ import time
 import numpy as np
 
 from config import ScanConfig
+from dhan_client import DhanClient, _iso_date
 from pattern import _score
 from prefilter import passes_prefilter
 
@@ -115,8 +116,9 @@ def rolling_prev_max(a: np.ndarray, w: int) -> np.ndarray:
 
 
 def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
-                    out_rows: list) -> int:
-    """Run the full pattern on every historical day; append signals."""
+                    out_rows: list, debug_symbol: str | None = None) -> int:
+    """Run the full pattern on every historical day; append signals.
+    If debug_symbol == sym, prints WHY candidate days are rejected."""
     o = np.asarray(bars["open"], float)
     h = np.asarray(bars["high"], float)
     l = np.asarray(bars["low"], float)
@@ -129,10 +131,14 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
 
     prev26 = rolling_prev_max(h, cfg.bos_lookback_26w)
     prev45 = rolling_prev_max(h, cfg.bos_lookback_swing)
-    last_ok = n - 16  # need 15 forward sessions to measure returns
 
     found = 0
-    for t in range(cfg.min_bars, last_ok):
+    dbg = debug_symbol == sym
+    # scan EVERY day INCLUDING the last bar: recent signals (e.g. the user's
+    # Jul-2026 setups happening days before today) must be included. The very
+    # last bar is reported with recent=1 and NaN forward returns (no entry
+    # price yet - it is today's still-forming signal).
+    for t in range(cfg.min_bars, n):
         # ---------------- BOS (mirrors pattern._find_bos) ----------------
         bos_day, bos_style, brk = None, None, None
         best = None
@@ -145,6 +151,8 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
                         best = (d, style, float(prev[d]))
                     break
         if best is None:
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] no BOS in window")
             continue
         bos_day, bos_style, brk = best
 
@@ -154,6 +162,10 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
             if np.isnan(h26) or h26 <= 0:
                 continue
             if np.max(h[bos_day:t + 1]) < h26 * cfg.swing_26w_proximity:
+                if dbg and dates[t] >= "2026-07-20":
+                    prox = np.max(h[bos_day:t + 1]) / h26 * 100
+                    print(f"    [{dates[t]}] swing BOS but peak {prox:.1f}% "
+                          f"of 26W high (need {cfg.swing_26w_proximity*100:.0f}%)")
                 continue
 
         # ------------------------- flush --------------------------------
@@ -165,6 +177,9 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         flush_low = float(l[fl])
         drop = (peak - flush_low) / peak
         if drop < cfg.flush_min_drop:
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] flush drop {drop*100:.1f}% < "
+                      f"{cfg.flush_min_drop*100:.0f}%")
             continue
         reds = [(c[i - 1] - c[i]) / c[i - 1] for i in range(pk + 1, t + 1)
                 if c[i] < c[i - 1]]
@@ -180,6 +195,9 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
             continue
         ratio = flush_low / ssl
         if ratio > 1 + cfg.ssl_tol_up or ratio < 1 - cfg.ssl_tol_dn:
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] flush low {flush_low:.1f} vs SSL "
+                      f"{ssl:.1f} ({ratio*100:.1f}%) outside tolerance")
             continue
 
         # ------------------------- hold --------------------------------
@@ -189,19 +207,36 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         # ---------------------- reversal day ---------------------------
         rng = h[t] - l[t]
         if rng <= 0 or c[t] <= o[t]:
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] last candle not green "
+                      f"(O {o[t]:.1f} C {c[t]:.1f})")
             continue
         if (c[t] - o[t]) / rng < cfg.body_ratio_min:
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] body ratio {(c[t]-o[t])/rng:.2f} < "
+                      f"{cfg.body_ratio_min}")
             continue
         if c[t] < c[t - 1] * (1 + cfg.bounce_min):
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] bounce {(c[t]/c[t-1]-1)*100:.1f}% < "
+                      f"{cfg.bounce_min*100:.0f}%")
             continue
         if c[t] < ssl * cfg.near_ssl_close_min:
             continue
         if c[t] >= peak:
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] close {c[t]:.1f} >= peak {peak:.1f} "
+                      f"(too late)")
             continue
 
         # ------------------- prefilter (same as live) ------------------
-        ok, _ = passes_prefilter(bars, cfg)
+        # CRITICAL: slice bars to day t ONLY - using the full history would
+        # look ahead into the future (close[-1] is the last day of the
+        # dataset, not day t) and corrupt every historical signal.
+        ok, why = passes_prefilter({k: v[:t + 1] for k, v in bars.items()}, cfg)
         if not ok:
+            if debug_symbol and sym == debug_symbol:
+                print(f"    [{dates[t]}] prefilter REJECT: {why}")
             continue
 
         # --------------------- score (same formula) --------------------
@@ -216,7 +251,30 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         score, _parts = _score(sig_tmp, {"close": c[:t + 1]}, cfg)
         if score < cfg.score_threshold:
             continue
+        # flatten the score components (needed for the last-bar branch too)
+        comp = {name: round(v, 1) for name, (v, _m) in (_parts or {}).items()}
         # ------------------- forward returns (next open) ---------------
+        if t + 1 >= n:
+            # last bar: signal is forming today, no forward data yet
+            out_rows.append({
+                "symbol": sym, "date": dates[t],
+                "close": round(float(c[t]), 2), "score": score,
+                "bos": dates[bos_day], "style": bos_style,
+                "peak": round(peak, 2), "flush_low": round(flush_low, 2),
+                "ssl": round(ssl, 2),
+                "score_freshness": comp.get("BOS freshness", ""),
+                "score_flush": comp.get("Flush depth", ""),
+                "score_ssl": comp.get("SSL precision", ""),
+                "score_bounce": comp.get("Reversal bounce", ""),
+                "score_body": comp.get("Candle body", ""),
+                "score_trend": comp.get("Trend (EMA20/50)", ""),
+                "r3": float("nan"), "r5": float("nan"), "r7": float("nan"),
+                "r10": float("nan"), "r15": float("nan"),
+                "max15": float("nan"), "min15": float("nan"),
+                "big_move": 0, "recent": 1,
+            })
+            found += 1
+            continue
         entry = o[t + 1]
         if entry <= 0:
             continue
@@ -224,14 +282,17 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         for k in (3, 5, 7, 10, 15):
             if t + k < n:
                 fwd[f"r{k}"] = (c[t + k] / entry - 1) * 100
-        max15 = float(np.max(c[t + 1:t + 16]) / entry - 1) * 100
-        min15 = float(np.min(c[t + 1:t + 16]) / entry - 1) * 100
+        # partial windows are fine: recent signals have incomplete forward
+        # data (NaN where not enough bars yet) - still reported.
+        fwd_win = c[t + 1:min(t + 16, n)]
+        max15 = float(np.max(fwd_win) / entry - 1) * 100 if len(fwd_win) else float("nan")
+        min15 = float(np.min(fwd_win) / entry - 1) * 100 if len(fwd_win) else float("nan")
         # "big move" = the Sportking-style pop: best close within 15d
         # gains >= 8% from entry (the alert's "big move not fired yet")
-        big_move = 1 if max15 >= cfg.big_move_pct else 0
+        big_move = 1 if (not np.isnan(max15) and max15 >= cfg.big_move_pct) else 0
+        # recent = still forming (fewer than 15 forward sessions available)
+        recent = 1 if t + 15 >= n else 0
 
-        # flatten the score components into the row (Excel shows all details)
-        comp = {name: round(v, 1) for name, (v, _m) in (_parts or {}).items()}
         out_rows.append({
             "symbol": sym, "date": dates[t], "close": round(float(c[t]), 2),
             "score": score, "bos": dates[bos_day], "style": bos_style,
@@ -249,7 +310,7 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
             "r10": round(fwd.get("r10", float("nan")), 2),
             "r15": round(fwd.get("r15", float("nan")), 2),
             "max15": round(max15, 2), "min15": round(min15, 2),
-            "big_move": big_move,
+            "big_move": big_move, "recent": recent,
         })
         found += 1
     return found
@@ -400,6 +461,9 @@ def main() -> int:
     ap.add_argument("--out", default="signals_backtest.csv")
     ap.add_argument("--limit", type=int, default=0,
                     help="scan only the first N symbols (0 = all)")
+    ap.add_argument("--debug-symbol", default=None,
+                    help="print WHY this symbol's candidate days are "
+                         "rejected (e.g. --debug-symbol SPORTKING)")
     ap.add_argument("--days", type=int, default=None,
                     help="override: fetch N calendar days of history")
     args = ap.parse_args()
@@ -420,7 +484,8 @@ def main() -> int:
             print("ERROR: set DHAN_ACCESS_TOKEN (and DHAN_CLIENT_ID) to run "
                   "with source=dhan, or use --source yfinance.", file=sys.stderr)
             return 2
-        client = DhanClient(token, client_id)
+        client = DhanClient(token, client_id,
+                            min_interval=cfg.request_interval)
         try:
             symbols = client.liquid_universe()
         except Exception as e:  # noqa: BLE001
@@ -444,12 +509,27 @@ def main() -> int:
     for i, sym in enumerate(symbols, 1):
         try:
             if args.source == "dhan":
-                bars = client.get_daily(sym, start, end)
+                # retry on 429 with backoff (a single 429 used to skip the
+                # symbol entirely, e.g. BAJFINANCE was missing)
+                bars = None
+                for attempt in range(4):
+                    try:
+                        bars = client.get_daily(sym, start, end)
+                        break
+                    except Exception as e:  # noqa: BLE001
+                        if "429" in str(e) and attempt < 3:
+                            wait = 5 + 5 * attempt
+                            print(f"    429 on {sym} -> retry in {wait}s "
+                                  f"({attempt + 1}/3)", flush=True)
+                            time.sleep(wait)
+                        else:
+                            raise
                 if bars is None or len(bars.get("close", [])) < cfg.min_bars:
                     errors += 1
                     continue
-                # ensure ISO dates (Dhan may return epoch)
-                bars["dates"] = [str(d)[:10] for d in bars["dates"]]
+                # ensure ISO dates (Dhan returns epoch seconds - MUST convert
+                # with _iso_date, not str()[:10] which keeps the epoch)
+                bars["dates"] = [_iso_date(d) for d in bars["dates"]]
             else:
                 import yfinance as yf
                 df = yf.Ticker(f"{sym}.NS").history(
@@ -465,7 +545,7 @@ def main() -> int:
                     "volume": df["Volume"].to_numpy(float),
                     "dates": [d.date().isoformat() for d in df.index],
                 }
-            got = backtest_symbol(sym, cfg, bars, rows)
+            got = backtest_symbol(sym, cfg, bars, rows, args.debug_symbol)
             print(f"  {i}/{len(symbols)} {sym:12s} bars={len(bars['close']):4d} "
                   f"signals={got}", flush=True)
         except Exception as e:  # noqa: BLE001

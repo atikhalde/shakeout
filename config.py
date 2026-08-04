@@ -61,8 +61,11 @@ class ScanConfig:
     flush_max_age: int = 3           # flush low must be within N bars of signal day
 
     # --------------------------------------------------------------- SSL
-    ssl_pre_lookback: int = 10       # bars before BOS day used for the SSL level
-                                     # (the last ~2 weeks of lows before the run-up)
+    ssl_pre_lookback: int = 7        # bars before BOS day used for the SSL level
+                                     # (the recent base lows right before the
+                                     # run-up; 10+ picks up older dips that
+                                     # pollute the SSL - e.g. SPORTKING's Jul-13
+                                     # dip at 179 vs the real base at ~194)
     ssl_tol_up: float = 0.015        # flush low may be up to 1.5% ABOVE the SSL
     ssl_tol_dn: float = 0.010        # ... or wick up to 1.0% BELOW (close must hold)
 

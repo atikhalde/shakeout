@@ -141,12 +141,16 @@ def passes_prefilter(bars: dict, cfg: ScanConfig) -> tuple[bool, str]:
     # 1) weekly RSI(14) > 60
     if cfg.prefilter_rsi_min is not None:
         r = _rsi(wk, 14)
+        if np.isnan(r):
+            return False, f"weekly RSI: insufficient history ({len(wk)} weeks)"
         if not (r > cfg.prefilter_rsi_min):
             return False, f"weekly RSI {r:.1f} <= {cfg.prefilter_rsi_min}"
 
     # 2) weekly MACD histogram (slow=26, fast=12, signal=9) > 0
     if cfg.prefilter_macd_min is not None:
         mh = _macd_hist(wk)  # defaults: fast=12, slow=26, signal=9
+        if np.isnan(mh):
+            return False, f"weekly MACD: insufficient history ({len(wk)} weeks)"
         if not (mh > cfg.prefilter_macd_min):
             return False, f"weekly MACD hist {mh:.2f} <= {cfg.prefilter_macd_min}"
 

@@ -110,7 +110,7 @@ def _sportking():
     ]
     pre = _concat(_pre_history(60, 180, 215.6, rng, 0.015, max_cap=215.6),
                   _pre_history(60, 215.6, 150, rng, 0.020, max_cap=215.6),
-                  _pre_history(30, 150, 193, rng, 0.010),
+                  _pre_history(55, 150, 197, rng, 0.010),
                   _rows(base))
     dates, bars = _finalize("SPORTKING", pre, _rows(run), "2026-07-31")
     return "SPORTKING", dates, bars, "2026-07-31"
@@ -140,7 +140,7 @@ def _bajfinance():
     ]
     pre = _concat(_pre_history(80, 980, 1074, rng, 0.010, max_cap=1075),
                   _pre_history(60, 1074, 950, rng, 0.016, max_cap=1075),
-                  _pre_history(15, 950, 1000, rng, 0.006),
+                  _pre_history(55, 950, 995, rng, 0.006),
                   _rows(base))
     dates, bars = _finalize("BAJFINANCE", pre, _rows(run), "2026-07-27")
     return "BAJFINANCE", dates, bars, "2026-07-27"
@@ -170,7 +170,7 @@ def _spr_auto():
     ]
     pre = _concat(_pre_history(80, 3800, 4523, rng, 0.012, max_cap=4525),
                   _pre_history(60, 4523, 3600, rng, 0.018, max_cap=4525),
-                  _pre_history(15, 3600, 4050, rng, 0.006),
+                  _pre_history(55, 3600, 4100, rng, 0.006),
                   _rows(base))
     dates, bars = _finalize("SPR_AUTO", pre, _rows(run), "2026-07-27")
     return "SPR_AUTO", dates, bars, "2026-07-27"
@@ -235,7 +235,7 @@ def _neg_post_move():
     base = [(195.0, 197.5, 194.4, 196.5, 900_000)] * 10
     pre = _concat(_pre_history(60, 180, 215.6, rng, 0.015, max_cap=215.6),
                   _pre_history(60, 215.6, 150, rng, 0.020, max_cap=215.6),
-                  _pre_history(30, 150, 193, rng, 0.010),
+                  _pre_history(55, 150, 197, rng, 0.010),
                   _rows(base))
     rows = [
         (198.34, 205.22, 198.34, 201.13, 1_500_000),
@@ -257,7 +257,7 @@ def _neg_still_falling():
     base = [(195.0, 197.5, 194.4, 196.5, 900_000)] * 10
     pre = _concat(_pre_history(60, 180, 215.6, rng, 0.015, max_cap=215.6),
                   _pre_history(60, 215.6, 150, rng, 0.020, max_cap=215.6),
-                  _pre_history(30, 150, 193, rng, 0.010),
+                  _pre_history(55, 150, 197, rng, 0.010),
                   _rows(base))
     rows = [
         (198.34, 205.22, 198.34, 201.13, 1_500_000),
@@ -277,7 +277,7 @@ def _neg_shallow_pullback():
     base = [(195.0, 197.5, 194.4, 196.5, 900_000)] * 10
     pre = _concat(_pre_history(60, 180, 215.6, rng, 0.015, max_cap=215.6),
                   _pre_history(60, 215.6, 150, rng, 0.020, max_cap=215.6),
-                  _pre_history(30, 150, 193, rng, 0.010),
+                  _pre_history(55, 150, 197, rng, 0.010),
                   _rows(base))
     rows = [
         (198.34, 205.22, 198.34, 201.13, 1_500_000),

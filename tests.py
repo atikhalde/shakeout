@@ -271,6 +271,33 @@ def test_run_live_unpack() -> None:
     check("run_live returns a list", isinstance(rows, list))
 
 
+def test_backtest_finds_verified_stocks() -> None:
+    """Regression: the backtest must find the 3 verified stocks on their
+    exact signal dates (demo data), with ISO dates and recent flag."""
+    print("== backtest finds the 3 verified stocks ==")
+    import numpy as np
+    import backtest as bt
+    from config import ScanConfig
+    from demo_data import demo_universe
+
+    cfg = ScanConfig()
+    rows = []
+    expected = {"SPORTKING": "2026-07-31", "BAJFINANCE": "2026-07-27",
+                "SPR_AUTO": "2026-07-27"}
+    for sym, sig_date in expected.items():
+        dates, bars, _ = demo_universe()[sym]
+        bars2 = {k: np.array(v, float) for k, v in bars.items() if k != "symbol"}
+        bars2["dates"] = list(dates)
+        got = bt.backtest_symbol(sym, cfg, bars2, rows)
+        check(f"{sym} found in backtest", got >= 1, f"got {got}")
+        hit = [r for r in rows if r["symbol"] == sym and r["date"] == sig_date]
+        check(f"{sym} on exact date {sig_date}", len(hit) == 1,
+              f"dates found: {[r['date'] for r in rows if r['symbol']==sym]}")
+        if hit:
+            check(f"{sym} date is ISO (not epoch)", hit[0]["date"].count("-") == 2)
+            check(f"{sym} has recent flag", "recent" in hit[0])
+
+
 def test_negatives() -> None:
     print("== negative cases (must NOT flag) ==")
     cfg = ScanConfig()
@@ -305,6 +332,7 @@ def main() -> int:
     test_universe()
     test_positives()
     test_aci_26w_proximity()
+    test_backtest_finds_verified_stocks()
     test_run_live_unpack()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")
