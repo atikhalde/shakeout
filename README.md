@@ -307,6 +307,39 @@ Every Telegram alert now shows **what the score rewards**:
 `BOS freshness 21/25 · Flush depth 20/20 · SSL precision 18/20 ·
 Reversal bounce 10/20 · Candle body 7/15 · Trend (EMA20/50) 5/5`
 
+
+## 📊 Backtest (run it yourself on Dhan history)
+
+`backtest.py` replays the exact scanner logic over **real Dhan historical
+data** and measures what happened AFTER each signal (entry = next day open):
+
+```bash
+# locally (needs DHAN_ACCESS_TOKEN / DHAN_CLIENT_ID in .env or env):
+python backtest.py --source dhan --years 2 --limit 500 --min-score 55
+
+# or in the cloud: repo -> Actions -> "Backtest" -> Run workflow
+#   (years / limit / min_score are inputs; CSV is uploaded as an artifact)
+```
+
+Output: `signals_backtest.csv` (every signal + r3/r5/r10/r15/max15/min15
+forward returns) and a printed summary with a **score>=60/70/80 split** so
+you can see whether raising the threshold improves the win rate.
+
+Reference results (Yahoo data, 90 large/mid-caps, 2 years, score>=55):
+```
+              3 days: win 86%  avg +1.8%
+              5 days: win 71%  avg +2.0%
+             10 days: win 57%  avg +0.7%
+     best within 15d: win 86%  avg +4.0%
+  score >= 60 -> 5-day win 83% avg +2.6%   (higher threshold = better)
+```
+
+Tips:
+- Start with `--limit 300` (~2 min) to see the speed, then `--limit 0`
+  for the whole ~2,145-stock universe (~5-8 min in Actions).
+- `--source yfinance` works locally without a Dhan token
+  (`pip install yfinance`) if you want a quick sanity check.
+
 ## 📦 GitHub setup
 
 The folder is ready to push as-is:
