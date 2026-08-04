@@ -212,6 +212,11 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
         "score": 0.0,
     }
     signal["score"], signal["score_parts"] = _score(signal, bars, cfg)
+    # high-confidence tag: bounce score >= 12/20 (backtest: 77% r5 win,
+    # 42% big-move - vs 63% / 21% for the balanced set)
+    signal["strong_reversal"] = bool(
+        signal.get("score_parts", {}).get("Reversal bounce", (0, 20))[0] >= 12
+    )
     return signal
 
 

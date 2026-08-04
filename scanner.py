@@ -343,6 +343,32 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             print(f"  {v:4d} x {k}")
         for s in err_samples:
             print(f"  e.g. {s}")
+
+    # ---- cooldown: drop repeat signals for the same symbol within
+    #      cooldown_days (backtest: repeats win only 30% vs 63% first) ----
+    if cfg.cooldown_days > 0 and signals:
+        signals.sort(key=lambda s: (s["symbol"], str(s["signal_date"])[:10]))
+        deduped, last_by_sym = [], {}
+        for s in signals:
+            sym = s["symbol"]
+            date_s = str(s["signal_date"])[:10]
+            if sym in last_by_sym:
+                try:
+                    import datetime as _dt
+                    gap = (_dt.date.fromisoformat(date_s)
+                           - _dt.date.fromisoformat(last_by_sym[sym])).days
+                    if gap <= cfg.cooldown_days:
+                        continue
+                except ValueError:
+                    pass
+            last_by_sym[sym] = date_s
+            deduped.append(s)
+        dropped = len(signals) - len(deduped)
+        if dropped:
+            print(f"cooldown: dropped {dropped} repeat signals within "
+                  f"{cfg.cooldown_days}d")
+        signals = deduped
+
     rows = _table_rows(sorted(signals, key=lambda s: -s["score"]))
     _print_table(rows)
 

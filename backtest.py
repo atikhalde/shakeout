@@ -556,6 +556,28 @@ def main() -> int:
             time.sleep(1)
         time.sleep(0.25)
 
+    # ---- cooldown: keep only the FIRST signal per symbol within
+    #      cooldown_days (backtest-verified: repeats win 30% vs 63%) ----
+    if cfg.cooldown_days > 0 and rows:
+        rows.sort(key=lambda r: (r["symbol"], r["date"]))
+        dedup, last_by_sym = [], {}
+        for r in rows:
+            sym = r["symbol"]
+            if sym in last_by_sym:
+                try:
+                    gap = (dt.date.fromisoformat(r["date"])
+                           - dt.date.fromisoformat(last_by_sym[sym])).days
+                    if gap <= cfg.cooldown_days:
+                        continue
+                except ValueError:
+                    pass
+            last_by_sym[sym] = r["date"]
+            dedup.append(r)
+        print(f"cooldown: {len(rows)} -> {len(dedup)} signals "
+              f"(dropped {len(rows)-len(dedup)} repeats within "
+              f"{cfg.cooldown_days}d)")
+        rows = dedup
+
     rows.sort(key=lambda r: r["date"])
     if rows:
         with open(args.out, "w", newline="") as f:

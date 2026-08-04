@@ -54,7 +54,10 @@ class ScanConfig:
     swing_26w_proximity: float = 0.97
 
     # -------------------------------------------------------------- flush
-    flush_min_drop: float = 0.04     # peak -> flush-low drawdown >= 4%
+    # Backtest-informed (117 signals, 150 stocks, 3y):
+    #   flush >= 6% keeps the 3 verified stocks (BAJFINANCE 6.7%) while
+    #   cutting the weakest; the aggressive >=7% recipe is a tuning option
+    flush_min_drop: float = 0.06     # peak -> flush-low drawdown >= 6%
     flush_red_day_min: float = 0.015 # at least one red CLOSE >= 1.5% in the flush
                                      # (close-to-close; e.g. Bajaj's flush had
                                      #  -1.9% and -2.6% closes but no fat red body)
@@ -70,7 +73,9 @@ class ScanConfig:
     ssl_tol_dn: float = 0.010        # ... or wick up to 1.0% BELOW (close must hold)
 
     # --------------------------------------------------------- reversal day
-    bounce_min: float = 0.015        # signal day close >= prev close * (1 + 1.5%)
+    # Backtest-informed: bounce >= 1.8% keeps SPORTKING (2.5%), BAJFINANCE
+    # (3.5%) & SPR_AUTO (1.97% real) while cutting weak reversals
+    bounce_min: float = 0.018        # signal day close >= prev close * (1 + 1.8%)
     body_ratio_min: float = 0.25     # (close-open)/(high-low) >= 0.25 (strong green)
     near_ssl_close_min: float = 1.005  # signal close must be >= SSL * this
 
@@ -83,6 +88,12 @@ class ScanConfig:
     # ------------------------------------------------------------ tracking
     tracker_enabled: bool = True     # log every alert to CSV, mark HIT/MISS
     tracker_file: str = "signals_tracker.csv"   # after ~5 sessions
+
+    # ------------------------------------------------------------ cooldown
+    # Backtest-optimized: repeat signals within 15 days are WORSE
+    # (r5 win 30% vs 63% for first signals). Only the FIRST signal per
+    # symbol in a cooldown window is reported.
+    cooldown_days: int = 15
 
     # ---------------------------------------------------------------- live
     request_interval: float = 0.5    # seconds between Dhan API calls

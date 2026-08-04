@@ -76,8 +76,9 @@ class TelegramNotifier:
     def format_signal(sig: dict) -> str:
         s = sig
         live = bool(s.get("intraday"))
-        header = ("🚨 <b>LIVE PATTERN SIGNAL</b> (market open) — {sym} "
-                  if live else "🚨 <b>PATTERN SIGNAL</b> — {sym} ")
+        strong = " <b>⚡ STRONG REVERSAL</b>" if s.get("strong_reversal") else ""
+        header = ("🚨 <b>LIVE PATTERN SIGNAL</b> (market open) — {sym}" + strong + " "
+                  if live else "🚨 <b>PATTERN SIGNAL</b> — {sym}" + strong + " ")
         note = ("\n⚠️ <i>Intraday signal — the daily candle is still forming; "
                 "confirm by close.</i>" if live else "")
 
