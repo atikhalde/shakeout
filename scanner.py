@@ -276,7 +276,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         sig = detect_setup(bars, bars["dates"], cfg)
         if sig:
             sig["intraday"] = bool(live_merged)
-        return sig, ""
+        return sig, "", False
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:

@@ -232,6 +232,45 @@ def test_aci_26w_proximity() -> None:
               sig is not None and sig["signal_date"] == exp)
 
 
+def test_run_live_unpack() -> None:
+    """Regression: run_live's scan_one must always return 3-tuples
+    (the GitHub runner crashed with 'expected 3, got 2')."""
+    print("== run_live end-to-end (mocked Dhan, exercises unpack) ==")
+    import types
+    import unittest.mock as mock
+    import scanner as scanner_mod
+
+    # fake client: instruments + daily bars (returns the demo SPORTKING tail)
+    from demo_data import demo_universe
+    _dates, _bars, _exp = demo_universe()["SPORTKING"]
+    _bars = {k: list(v) for k, v in _bars.items()}
+    _bars["dates"] = list(_dates)
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def get_instruments(self):
+            return {"SPORTKING": "1", "BAJFINANCE": "2", "SPR_AUTO": "3"}
+        def liquid_universe(self):
+            return ["SPORTKING", "BAJFINANCE", "SPR_AUTO"]
+        def resolve_symbol(self, s): return "1"
+        def get_daily(self, sym, *a, **k):
+            b = {kk: list(vv) for kk, vv in _bars.items()}
+            b["symbol"] = sym
+            return b
+        def intraday_partial(self, *a, **k): return None
+
+    import dhan_client as dhan_mod
+    with mock.patch.object(dhan_mod, "DhanClient", FakeClient):
+        rows = scanner_mod.run_live(
+            ScanConfig(), "tok", "cid", limit=0,
+            watchlist="watchlist.txt", from_days=400,
+            force_refresh=False, debug=False, intraday=False,
+            notifier=None,
+        )
+    check("run_live completes without crash", rows is not None)
+    check("run_live returns a list", isinstance(rows, list))
+
+
 def test_negatives() -> None:
     print("== negative cases (must NOT flag) ==")
     cfg = ScanConfig()
@@ -266,6 +305,7 @@ def main() -> int:
     test_universe()
     test_positives()
     test_aci_26w_proximity()
+    test_run_live_unpack()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1
