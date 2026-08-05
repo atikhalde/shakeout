@@ -300,50 +300,22 @@ class DhanClient:
             if bars and bars["dates"] and bars["dates"][-1] >= to_date.isoformat():
                 return self._slice(bars, from_date, to_date)
 
-        # Dhan's historical endpoint can reject very long ranges - fetch in
-        # ~2-year chunks and merge (5 years = 3 requests, robust to limits)
-        def fetch_chunk(f: dt.date, t: dt.date):
-            payload = {
-                "securityId": security_id,
-                "exchangeSegment": "NSE_EQ",
-                "instrument": "EQUITY",
-                "expiryCode": 0,
-                "oi": False,
-                "fromDate": f.isoformat(),
-                "toDate": t.isoformat(),
-                "dhanClientId": self.client_id,
-            }
-            r = self._post("/v2/charts/historical", payload)
-            return self._parse_ohlc(r)
-
-        chunk_days = 730  # ~2 years
-        chunks = []
-        cur = from_date
-        while cur < to_date:
-            end = min(cur + dt.timedelta(days=chunk_days), to_date)
-            b = fetch_chunk(cur, end)
-            if b is not None:
-                chunks.append(b)
-            cur = end + dt.timedelta(days=1)
-            if cur > to_date:
-                break
-
-        if not chunks:
+        # SINGLE request - the version proven to work (yesterday + today's
+        # 12:22 run found 916 signals with this). Do NOT chunk.
+        payload = {
+            "securityId": security_id,
+            "exchangeSegment": "NSE_EQ",
+            "instrument": "EQUITY",
+            "expiryCode": 0,
+            "oi": False,
+            "fromDate": from_date.isoformat(),
+            "toDate": to_date.isoformat(),
+            "dhanClientId": self.client_id,
+        }
+        r = self._post("/v2/charts/historical", payload)
+        bars = self._parse_ohlc(r)
+        if bars is None:
             return None
-        if len(chunks) == 1:
-            bars = chunks[0]
-        else:
-            # merge chunks (dedupe by date, keep order)
-            seen, dates, o, h, l, c, v = set(), [], [], [], [], [], []
-            for b in chunks:
-                for i, d in enumerate(b["dates"]):
-                    if d in seen:
-                        continue
-                    seen.add(d)
-                    dates.append(d); o.append(b["open"][i]); h.append(b["high"][i])
-                    l.append(b["low"][i]); c.append(b["close"][i]); v.append(b["volume"][i])
-            bars = {"dates": dates, "open": o, "high": h,
-                    "low": l, "close": c, "volume": v}
         bars["symbol"] = symbol
         self._write_cache(cache_file, bars)
         return self._slice(bars, from_date, to_date)
