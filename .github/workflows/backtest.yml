@@ -28,6 +28,10 @@ name: Backtest
         description: "Minimum signal score"
         type: number
         default: 55
+      min_mcap:
+        description: "Only liquid stocks >= this mcap in crores (1000 recommended)"
+        type: number
+        default: 1000
 
 permissions:
   contents: read
@@ -63,6 +67,7 @@ jobs:
             --years ${{ inputs.years }} \
             --limit ${{ inputs.limit }} \
             --min-score ${{ inputs.min_score }} \
+            --min-mcap ${{ inputs.min_mcap }} \
             --out signals_backtest.csv
 
       - name: Upload signals (CSV + Excel)
