@@ -492,7 +492,7 @@ def main() -> int:
         # (1.2s between calls, serial) to avoid Dhan's 429 on the shared
         # GitHub runner IP; slower but completes instead of dying
         client = DhanClient(token, client_id,
-                            min_interval=1.2)
+                            min_interval=cfg.request_interval)
         try:
             symbols = client.liquid_universe()
         except Exception as e:  # noqa: BLE001
@@ -526,7 +526,15 @@ def main() -> int:
     skipped_429 = 0
     consec_429 = 0
     fast_skip = False
-    for i, sym in enumerate(symbols, 1):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading as _th
+
+    stats_lock = _th.Lock()
+    stats = {"skipped_429": 0, "errors": 0, "no_data": 0}
+
+    def process_one(sym):
+        """Fetch + run pattern for ONE symbol. Returns
+        (sym, sub_rows, bars_n_or_err). Thread-safe (own result list)."""
         try:
             if args.source == "dhan":
                 # 429 handling - NEVER hang: wait 5s, retry ONCE, then skip
@@ -542,27 +550,20 @@ def main() -> int:
                 for attempt in range(2):
                     try:
                         bars = client.get_daily(sym, start, end)
-                        consec_429 = 0
                         break
                     except Exception as e:  # noqa: BLE001
                         if "429" in str(e):
-                            consec_429 += 1
-                            if consec_429 >= 10:
-                                fast_skip = True
-                            if attempt == 0 and not fast_skip:
+                            with stats_lock:
+                                stats["skipped_429"] += 1
+                                limited = stats["skipped_429"] >= 10
+                            if attempt == 0 and not limited:
                                 time.sleep(5)  # short pause, retry once
-                            else:
-                                skipped_429 += 1
                         else:
                             raise
                 if bars is None or len(bars.get("close", [])) < cfg.min_bars:
-                    errors += 1
-                    if i % 50 == 0 and skipped_429:
-                        print(f"  ... {i}/{len(symbols)} done, "
-                              f"{skipped_429} rate-limited so far "
-                              f"(will be fetched on the next run)",
-                              flush=True)
-                    continue
+                    with stats_lock:
+                        stats["no_data"] += 1
+                    return (sym, [], None)
                 # ensure ISO dates (Dhan returns epoch seconds - MUST convert
                 # with _iso_date, not str()[:10] which keeps the epoch)
                 bars["dates"] = [_iso_date(d) for d in bars["dates"]]
@@ -583,14 +584,39 @@ def main() -> int:
                     "volume": df["Volume"].to_numpy(float),
                     "dates": [d.date().isoformat() for d in df.index],
                 }
-            got = backtest_symbol(sym, cfg, bars, rows, args.debug_symbol)
-            print(f"  {i}/{len(symbols)} {sym:12s} bars={len(bars['close']):4d} "
-                  f"signals={got}", flush=True)
+            sub = []
+            got = backtest_symbol(sym, cfg, bars, sub, args.debug_symbol)
+            return (sym, sub, len(bars["close"]))
         except Exception as e:  # noqa: BLE001
-            errors += 1
-            print(f"  {i}/{len(symbols)} {sym:12s} ERROR {str(e)[:70]}")
-            time.sleep(1)
-        time.sleep(0.25)
+            with stats_lock:
+                stats["errors"] += 1
+            return (sym, [], str(e)[:70])
+
+    with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
+        futs = {ex.submit(process_one, s): s for s in symbols}
+        done = 0
+        for fut in as_completed(futs):
+            sym = futs[fut]
+            r = fut.result()
+            done += 1
+            if r[1]:
+                rows.extend(r[1])
+            if isinstance(r[2], str):
+                print(f"  {done}/{len(symbols)} {sym:12s} ERROR {r[2]}",
+                      flush=True)
+            elif r[2] is None:
+                print(f"  {done}/{len(symbols)} {sym:12s} no data",
+                      flush=True)
+            else:
+                print(f"  {done}/{len(symbols)} {sym:12s} "
+                      f"bars={r[2]:4d} signals={len(r[1])}", flush=True)
+            if done % 25 == 0 or done == len(symbols):
+                el = time.time() - t0
+                rate = done / max(el, 1e-6)
+                eta = (len(symbols) - done) / rate / 60
+                print(f"    [{el/60:.1f} min elapsed, {rate:.2f} sym/s, "
+                      f"ETA {eta:.1f} min, {stats['skipped_429']} rate-limited]",
+                      flush=True)
 
     # ---- cooldown: keep only the FIRST signal per symbol within
     #      cooldown_days (backtest-verified: repeats win 30% vs 63%) ----
@@ -625,11 +651,12 @@ def main() -> int:
         xlsx = os.path.splitext(args.out)[0] + ".xlsx"
         write_excel(rows, xlsx)
 
-    if skipped_429:
-        print(f"NOTE: {skipped_429} symbols were skipped due to Dhan rate "
-              f"limit. Run the backtest again later - the daily-bar cache "
-              f"means only the skipped symbols need fetching.")
-    print_summary(rows, errors, time.time() - t0, cfg)
+    if stats["skipped_429"]:
+        print(f"NOTE: {stats['skipped_429']} symbols were skipped due to Dhan "
+              f"rate limit. Run the backtest again later - the daily-bar "
+              f"cache means only the skipped symbols need fetching.")
+    print_summary(rows, stats["errors"] + stats["no_data"],
+                  time.time() - t0, cfg)
     return 0
 
 
