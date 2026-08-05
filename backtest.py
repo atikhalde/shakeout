@@ -461,6 +461,10 @@ def main() -> int:
     ap.add_argument("--out", default="signals_backtest.csv")
     ap.add_argument("--limit", type=int, default=0,
                     help="scan only the first N symbols (0 = all)")
+    ap.add_argument("--min-mcap", type=float, default=0,
+                    help="only backtest symbols with market cap >= this many "
+                         "crores (uses data/market_cap.csv; 1000 = liquid "
+                         "stocks only - matches what the live scanner trades)")
     ap.add_argument("--debug-symbol", default=None,
                     help="print WHY this symbol's candidate days are "
                          "rejected (e.g. --debug-symbol SPORTKING)")
@@ -494,6 +498,16 @@ def main() -> int:
             symbols = list(UNIVERSE)
     else:
         symbols = list(UNIVERSE)
+    if args.min_mcap:
+        from prefilter import load_mcap, mcap_filter
+        mcap = load_mcap(cfg.mcap_file)
+        if mcap:
+            before = len(symbols)
+            symbols, _dropped = mcap_filter(symbols, mcap, args.min_mcap)
+            print(f"mcap filter: {before} -> {len(symbols)} symbols "
+                  f"(>= {args.min_mcap:.0f} Cr)")
+        else:
+            print(f"WARNING: {cfg.mcap_file} not found - min-mcap skipped")
     if args.limit:
         symbols = symbols[:args.limit]
     print(f"source={args.source} universe={len(symbols)} symbols, "
