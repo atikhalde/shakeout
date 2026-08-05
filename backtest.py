@@ -465,7 +465,7 @@ def main() -> int:
                     help="ignore the daily-bar cache (rebuild it fresh) "
                          "- use once if the cache is polluted from failed "
                          "runs, then drop it")
-    ap.add_argument("--min-mcap", type=float, default=1000,
+    ap.add_argument("--min-mcap", type=float, default=0,
                     help="only backtest symbols with market cap >= this many "
                          "crores (uses data/market_cap.csv; 1000 = liquid "
                          "stocks only - matches what the live scanner trades)")
@@ -530,26 +530,39 @@ def main() -> int:
     skipped_429 = 0
     consec_429 = 0
     fast_skip = False
+    rate_limit_streak = 0
     for i, sym in enumerate(symbols, 1):
         try:
             if args.source == "dhan":
-                # serial, single request - the version proven to work
-                # (12:22 run found 916 signals this way). 429: wait 5s,
-                # retry once, then skip fast (never hang).
+                # ----- YESTERDAY'S PROVEN LOGIC: serial, single request ----
                 bars = None
                 for attempt in range(2):
                     try:
-                        bars = client.get_daily(sym, start, end,
-                                                force_refresh=args.no_cache)
+                        bars = client.get_daily(sym, start, end)
                         break
                     except Exception as e:  # noqa: BLE001
                         if "429" in str(e):
+                            rate_limit_streak += 1
                             if attempt == 0:
-                                time.sleep(5)
+                                # wait 30s once, then retry (like yesterday)
+                                print(f"    429 on {sym} -> wait 30s, "
+                                      f"retry once", flush=True)
+                                time.sleep(30)
                             else:
                                 skipped_429 += 1
                         else:
                             raise
+                # ----- EARLY STOP: if the account is fully rate-limited,
+                #       stop instead of grinding 19s x 1500 symbols ----
+                if rate_limit_streak >= 3:
+                    print(f"\nSTOP: {rate_limit_streak} consecutive 429s - "
+                          f"Dhan is rate-limiting right now (quota or "
+                          f"hourly limit). No point continuing.\n"
+                          f"-> Wait ~1 hour for Dhan's limit to reset, "
+                          f"or check the token at dhanhq.co, then re-run. "
+                          f"Fetched symbols are cached, so the next run "
+                          f"resumes where this left off.\n", flush=True)
+                    break
                 if bars is None or len(bars.get("close", [])) < cfg.min_bars:
                     errors += 1
                     if bars is None:
@@ -578,18 +591,11 @@ def main() -> int:
                     "dates": [d.date().isoformat() for d in df.index],
                 }
             got = backtest_symbol(sym, cfg, bars, rows, args.debug_symbol)
-            print(f"  {i}/{len(symbols)} {sym:12s} bars={len(bars['close']):4d} "
-                  f"signals={got}", flush=True)
+            print(f"  {i}/{len(symbols)} {sym:12s} "
+                  f"bars={len(bars['close']):4d} signals={got}", flush=True)
         except Exception as e:  # noqa: BLE001
             errors += 1
             print(f"  {i}/{len(symbols)} {sym:12s} ERROR {str(e)[:70]}",
-                  flush=True)
-        if i % 25 == 0:
-            el = time.time() - t0
-            rate = i / max(el, 1e-6)
-            eta = (len(symbols) - i) / rate / 60
-            print(f"    [{el/60:.1f} min elapsed, {rate:.2f} sym/s, "
-                  f"ETA {eta:.1f} min, {skipped_429} rate-limited]",
                   flush=True)
 
     # ---- cooldown: keep only the FIRST signal per symbol within
