@@ -468,7 +468,7 @@ def main() -> int:
     ap.add_argument("--resume", action="store_true",
                     help="skip symbols already in the daily-bar cache "
                          "(resume after a throttled/cancelled run)")
-    ap.add_argument("--min-mcap", type=float, default=0,
+    ap.add_argument("--min-mcap", type=float, default=1000,
                     help="only backtest symbols with market cap >= this many "
                          "crores (uses data/market_cap.csv; 1000 = liquid "
                          "stocks only - matches what the live scanner trades)")
