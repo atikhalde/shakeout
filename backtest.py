@@ -461,6 +461,10 @@ def main() -> int:
     ap.add_argument("--out", default="signals_backtest.csv")
     ap.add_argument("--limit", type=int, default=0,
                     help="scan only the first N symbols (0 = all)")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore the daily-bar cache (rebuild it fresh) "
+                         "- use once if the cache is polluted from failed "
+                         "runs, then drop it")
     ap.add_argument("--min-mcap", type=float, default=1000,
                     help="only backtest symbols with market cap >= this many "
                          "crores (uses data/market_cap.csv; 1000 = liquid "
@@ -535,7 +539,8 @@ def main() -> int:
                 bars = None
                 for attempt in range(2):
                     try:
-                        bars = client.get_daily(sym, start, end)
+                        bars = client.get_daily(sym, start, end,
+                                                force_refresh=args.no_cache)
                         break
                     except Exception as e:  # noqa: BLE001
                         if "429" in str(e):
