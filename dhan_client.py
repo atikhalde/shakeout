@@ -105,6 +105,7 @@ class DhanClient:
         self._last_call = 0.0
         self._lock = threading.Lock()
         self._instruments: Optional[dict[str, str]] = None
+        self._last_raw: str = ""
         os.makedirs(cache_dir, exist_ok=True)
 
     # ------------------------------------------------------------------ http
@@ -422,12 +423,20 @@ class DhanClient:
 
     # ------------------------------------------------------------- parsing
     def _parse_ohlc(self, r: requests.Response) -> Optional[dict]:
-        """Tolerant parser for the columnar JSON shape Dhan returns."""
+        """Tolerant parser for the columnar JSON shape Dhan returns.
+        Stores the raw response body in self._last_raw for diagnostics."""
         try:
             data = r.json()
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            self._last_raw = f"json-parse-error: {e} | {r.text[:200]}"
             return None
         if isinstance(data, dict):
+            # capture error bodies (quota / invalid token / etc.)
+            if "errorType" in data or "errorMessage" in data:
+                self._last_raw = (f"{data.get('errorType')} "
+                                  f"{data.get('errorCode')} "
+                                  f"{data.get('errorMessage')}")
+                return None
             inner = data.get("data") if isinstance(data.get("data"), (dict, list)) else data
         else:
             inner = data

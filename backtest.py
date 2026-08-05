@@ -564,8 +564,11 @@ def main() -> int:
                     with stats_lock:
                         stats["no_data"] += 1
                     # report WHY (None = resolve/parse failed, 0 bars = empty)
-                    reason = ("none" if bars is None
-                              else f"only {len(bars.get('close', []))} bars")
+                    if bars is None:
+                        raw = getattr(client, "_last_raw", "")[:120]
+                        reason = f"none [dhan: {raw}]" if raw else "none"
+                    else:
+                        reason = f"only {len(bars.get('close', []))} bars"
                     return (sym, [], f"no data ({reason})")
                 # ensure ISO dates (Dhan returns epoch seconds - MUST convert
                 # with _iso_date, not str()[:10] which keeps the epoch)
