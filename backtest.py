@@ -456,12 +456,12 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", choices=["dhan", "yfinance"], default="dhan")
     ap.add_argument("--symbols-file", default=None)
-    ap.add_argument("--years", type=int, default=2)
+    ap.add_argument("--years", type=int, default=5)
     ap.add_argument("--min-score", type=float, default=None)
     ap.add_argument("--out", default="signals_backtest.csv")
     ap.add_argument("--limit", type=int, default=0,
                     help="scan only the first N symbols (0 = all)")
-    ap.add_argument("--min-mcap", type=float, default=0,
+    ap.add_argument("--min-mcap", type=float, default=1000,
                     help="only backtest symbols with market cap >= this many "
                          "crores (uses data/market_cap.csv; 1000 = liquid "
                          "stocks only - matches what the live scanner trades)")
@@ -526,16 +526,33 @@ def main() -> int:
                 # retry on 429 with backoff (a single 429 used to skip the
                 # symbol entirely, e.g. BAJFINANCE was missing)
                 bars = None
-                for attempt in range(4):
+                # Smart 429 handling: on rate-limit, wait 60s ONCE and retry
+                # once. If still limited, skip the symbol (don't burn 3
+                # retries x 60s per symbol - that's what made runs crawl at
+                # 1 min/symbol). If 5+ consecutive 429s, pause 5 min (Dhan
+                # hourly limit cooling) before continuing.
+                consecutive_429 = 0
+                for attempt in range(2):
                     try:
                         bars = client.get_daily(sym, start, end)
+                        consecutive_429 = 0
                         break
                     except Exception as e:  # noqa: BLE001
-                        if "429" in str(e) and attempt < 3:
-                            wait = 5 + 5 * attempt
-                            print(f"    429 on {sym} -> retry in {wait}s "
-                                  f"({attempt + 1}/3)", flush=True)
-                            time.sleep(wait)
+                        if "429" in str(e):
+                            consecutive_429 += 1
+                            if consecutive_429 >= 5:
+                                print(f"    ! {consecutive_429} consecutive 429s "
+                                      f"-> cooling 5 min", flush=True)
+                                time.sleep(300)
+                                consecutive_429 = 0
+                                continue
+                            if attempt == 0:
+                                print(f"    429 on {sym} -> wait 60s, retry once",
+                                      flush=True)
+                                time.sleep(60)
+                            else:
+                                print(f"    {sym} still 429 after retry -> skip",
+                                      flush=True)
                         else:
                             raise
                 if bars is None or len(bars.get("close", [])) < cfg.min_bars:
