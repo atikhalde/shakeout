@@ -56,7 +56,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/cache
-          key: backtest-dhan-${{ inputs.years }}y-${{ github.run_id }}
+          # STABLE key (no run_id!): the daily-bar cache must be reused
+          # across runs - a unique key meant every run re-downloaded all
+          # symbols and hammered Dhan's API -> 429s
+          key: backtest-dhan-${{ inputs.years }}y
           restore-keys: |
             backtest-dhan-
 
