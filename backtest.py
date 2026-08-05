@@ -563,7 +563,10 @@ def main() -> int:
                 if bars is None or len(bars.get("close", [])) < cfg.min_bars:
                     with stats_lock:
                         stats["no_data"] += 1
-                    return (sym, [], None)
+                    # report WHY (None = resolve/parse failed, 0 bars = empty)
+                    reason = ("none" if bars is None
+                              else f"only {len(bars.get('close', []))} bars")
+                    return (sym, [], f"no data ({reason})")
                 # ensure ISO dates (Dhan returns epoch seconds - MUST convert
                 # with _iso_date, not str()[:10] which keeps the epoch)
                 bars["dates"] = [_iso_date(d) for d in bars["dates"]]
@@ -590,7 +593,7 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             with stats_lock:
                 stats["errors"] += 1
-            return (sym, [], str(e)[:70])
+            return (sym, [], f"EXC {str(e)[:70]}")
 
     with ThreadPoolExecutor(max_workers=cfg.max_workers) as ex:
         futs = {ex.submit(process_one, s): s for s in symbols}
