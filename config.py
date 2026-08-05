@@ -96,10 +96,13 @@ class ScanConfig:
     cooldown_days: int = 15
 
     # ---------------------------------------------------------------- live
-    request_interval: float = 0.5    # seconds between Dhan API calls
-                                     # (Dhan's REAL free-tier limit is ~2/s;
-                                     # 3 workers x 0.5s = ~2 req/s)
-    max_workers: int = 3
+    request_interval: float = 1.5    # seconds between Dhan API calls.
+                                     # GENTLE pace: Dhan throttles foreign
+                                     # (GitHub US runner) IPs hard, especially
+                                     # after heavy usage. 1.5s serial = ~0.7
+                                     # req/s - slow but avoids the 429 wall.
+                                     # (Worked at 12:22 when we were gentler.)
+    max_workers: int = 1
     # hard cap on symbols scanned per run - the full ~2145-symbol liquid
     # universe at 2 req/s takes 18+ min MINIMUM plus Dhan latency from
     # GitHub's US runners (often 60+ min). Cap it so a daily run finishes

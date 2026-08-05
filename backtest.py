@@ -465,6 +465,9 @@ def main() -> int:
                     help="ignore the daily-bar cache (rebuild it fresh) "
                          "- use once if the cache is polluted from failed "
                          "runs, then drop it")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip symbols already in the daily-bar cache "
+                         "(resume after a throttled/cancelled run)")
     ap.add_argument("--min-mcap", type=float, default=0,
                     help="only backtest symbols with market cap >= this many "
                          "crores (uses data/market_cap.csv; 1000 = liquid "
@@ -515,6 +518,14 @@ def main() -> int:
                   f"(>= {args.min_mcap:.0f} Cr)")
         else:
             print(f"WARNING: {cfg.mcap_file} not found - min-mcap skipped")
+    if args.resume and args.source == "dhan":
+        import os as _os
+        cache_dir = "data/cache"
+        have = {_os.path.splitext(f)[0] for f in _os.listdir(cache_dir)}
+        before = len(symbols)
+        symbols = [s for s in symbols if s not in have]
+        print(f"resume: {before} -> {len(symbols)} symbols to fetch "
+              f"({before - len(symbols)} already cached)")
     if args.limit:
         symbols = symbols[:args.limit]
     print(f"source={args.source} universe={len(symbols)} symbols, "
@@ -552,17 +563,19 @@ def main() -> int:
                                 skipped_429 += 1
                         else:
                             raise
-                # ----- EARLY STOP: if the account is fully rate-limited,
-                #       stop instead of grinding 19s x 1500 symbols ----
+                # ----- RATE-LIMIT FAILOVER: if Dhan persistently 429s,
+                #       switch the REST of the run to yfinance so the
+                #       backtest always completes (useful when running
+                #       from a foreign IP that Dhan throttles) ----
                 if rate_limit_streak >= 3:
-                    print(f"\nSTOP: {rate_limit_streak} consecutive 429s - "
-                          f"Dhan is rate-limiting right now (quota or "
-                          f"hourly limit). No point continuing.\n"
-                          f"-> Wait ~1 hour for Dhan's limit to reset, "
-                          f"or check the token at dhanhq.co, then re-run. "
-                          f"Fetched symbols are cached, so the next run "
-                          f"resumes where this left off.\n", flush=True)
-                    break
+                    print(f"\n>>> Dhan rate-limiting ({rate_limit_streak} "
+                          f"consecutive 429s). Switching the REST of the "
+                          f"run to yfinance so the backtest still "
+                          f"completes. (Signal stats are close enough for "
+                          f"win-rate analysis.)\n", flush=True)
+                    args.source = "yfinance"
+                    rate_limit_streak = 0
+                    continue
                 if bars is None or len(bars.get("close", [])) < cfg.min_bars:
                     errors += 1
                     if bars is None:
