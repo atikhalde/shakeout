@@ -36,10 +36,6 @@ name: Backtest
         description: "Ignore the daily-bar cache (use ONCE to clear a polluted cache)"
         type: boolean
         default: false
-      resume:
-        description: "Skip symbols already cached (resume after a throttled run)"
-        type: boolean
-        default: true
       failover_yfinance:
         description: "Auto-switch to Yahoo data if Dhan keeps rate-limiting (foreign IP friendly)"
         type: boolean
@@ -84,7 +80,6 @@ jobs:
             --min-score ${{ inputs.min_score }} \
             --min-mcap ${{ inputs.min_mcap }} \
             ${{ inputs.no_cache && '--no-cache' || '' }} \
-            ${{ inputs.resume && '--resume' || '' }} \
             --out signals_backtest.csv
 
       - name: Upload signals (CSV + Excel)
