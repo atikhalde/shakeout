@@ -6,10 +6,10 @@ name: Backtest
 # Results: signals_backtest.csv artifact + summary on the run page.
 #
 # Inputs:
-#   years      = how many years of history (default 2)
+#   years      = how many years of history (default 5)
 #   limit      = max symbols to scan (0 = whole liquid universe ~2145).
 #                Start with 300-500 to see the speed, then go full.
-#   min_score  = only report signals with score >= this (default 55)
+#   min_score  = only report signals with score >= this (default 70)
 #
 # Cost: ~2145 Dhan calls at 5/sec ≈ 2-4 min + analysis ≈ 5-8 min total.
 # -------------------------------------------------------------
@@ -19,15 +19,15 @@ name: Backtest
       years:
         description: "Years of history"
         type: number
-        default: 2
+        default: 5
       limit:
         description: "Max symbols (0 = all ~2145)"
         type: number
-        default: 500
+        default: 0
       min_score:
         description: "Minimum signal score"
         type: number
-        default: 55
+        default: 70
       min_mcap:
         description: "Only liquid stocks >= this mcap in crores (1000 recommended)"
         type: number
