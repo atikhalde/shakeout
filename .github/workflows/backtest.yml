@@ -29,9 +29,9 @@ name: Backtest
         type: number
         default: 70
       min_mcap:
-        description: "Only liquid stocks >= this mcap in crores (0 = full universe, like yesterday)"
+        description: "Only liquid stocks >= this mcap in crores (1000 = your rule)"
         type: number
-        default: 0
+        default: 1000
       no_cache:
         description: "Ignore the daily-bar cache (use ONCE to clear a polluted cache)"
         type: boolean
