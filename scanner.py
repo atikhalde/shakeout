@@ -192,7 +192,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     from universes import get_universe
 
     client = DhanClient(token, client_id,
-                        min_interval=cfg.request_interval,
+                        min_interval=cfg.live_request_interval,
                         timeout=cfg.api_timeout)
 
     # ---- universe: Dhan instrument map first, watchlist/fallback otherwise ----
@@ -302,7 +302,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     from concurrent.futures import ThreadPoolExecutor, as_completed
     err_by_type: dict[str, int] = {}
     err_samples: list[str] = []
-    with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
+    with ThreadPoolExecutor(max_workers=cfg.live_max_workers) as pool:
         futs = {pool.submit(scan_one, s): s for s in symbols}
         done = 0
         for fut in as_completed(futs):

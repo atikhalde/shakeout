@@ -96,13 +96,18 @@ class ScanConfig:
     cooldown_days: int = 15
 
     # ---------------------------------------------------------------- live
-    request_interval: float = 1.5    # seconds between Dhan API calls.
-                                     # GENTLE pace: Dhan throttles foreign
-                                     # (GitHub US runner) IPs hard, especially
-                                     # after heavy usage. 1.5s serial = ~0.7
-                                     # req/s - slow but avoids the 429 wall.
-                                     # (Worked at 12:22 when we were gentler.)
-    max_workers: int = 1
+    # ---- BACKTEST pacing (gentle - heavy volume, avoid 429s) ----
+    request_interval: float = 1.5    # seconds between calls. GENTLE pace:
+                                     # the backtest fetches 1500+ symbols x 5y,
+                                     # so it must stay well under Dhan's
+                                     # throttle on foreign runner IPs.
+    max_workers: int = 1             # serial for the backtest
+
+    # ---- LIVE SCAN pacing (fast enough for the 16:30 IST window) ----
+    # Proven at 10:00 on 05-Aug: 0.5s x 3 workers scanned 800 symbols in
+    # ~12 min with only 5 errors. Dhan handles this fine.
+    live_request_interval: float = 0.5
+    live_max_workers: int = 3
     # hard cap on symbols scanned per run - the full ~2145-symbol liquid
     # universe at 2 req/s takes 18+ min MINIMUM plus Dhan latency from
     # GitHub's US runners (often 60+ min). Cap it so a daily run finishes
