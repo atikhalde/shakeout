@@ -518,14 +518,10 @@ def main() -> int:
                   f"(>= {args.min_mcap:.0f} Cr)")
         else:
             print(f"WARNING: {cfg.mcap_file} not found - min-mcap skipped")
-    if args.resume and args.source == "dhan":
-        import os as _os
-        cache_dir = "data/cache"
-        have = {_os.path.splitext(f)[0] for f in _os.listdir(cache_dir)}
-        before = len(symbols)
-        symbols = [s for s in symbols if s not in have]
-        print(f"resume: {before} -> {len(symbols)} symbols to fetch "
-              f"({before - len(symbols)} already cached)")
+    # NOTE: no --resume symbol filter here - get_daily() already reads the
+    # daily-bar cache automatically, so re-runs are fast WITHOUT dropping
+    # symbols from analysis (a resume filter caused universe=0 when the
+    # whole cache was populated - every symbol was skipped).
     if args.limit:
         symbols = symbols[:args.limit]
     print(f"source={args.source} universe={len(symbols)} symbols, "
