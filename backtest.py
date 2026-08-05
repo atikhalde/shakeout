@@ -488,8 +488,11 @@ def main() -> int:
             print("ERROR: set DHAN_ACCESS_TOKEN (and DHAN_CLIENT_ID) to run "
                   "with source=dhan, or use --source yfinance.", file=sys.stderr)
             return 2
+        # backtest fetches years of data per symbol - use a gentler rate
+        # (1.2s between calls, serial) to avoid Dhan's 429 on the shared
+        # GitHub runner IP; slower but completes instead of dying
         client = DhanClient(token, client_id,
-                            min_interval=cfg.request_interval)
+                            min_interval=1.2)
         try:
             symbols = client.liquid_universe()
         except Exception as e:  # noqa: BLE001
