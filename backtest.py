@@ -523,43 +523,45 @@ def main() -> int:
     errors = 0
     t0 = time.time()
 
+    skipped_429 = 0
+    consec_429 = 0
+    fast_skip = False
     for i, sym in enumerate(symbols, 1):
         try:
             if args.source == "dhan":
-                # retry on 429 with backoff (a single 429 used to skip the
-                # symbol entirely, e.g. BAJFINANCE was missing)
+                # 429 handling - NEVER hang: wait 5s, retry ONCE, then skip
+                # and move on. If 10+ consecutive 429s (account fully
+                # rate-limited), stop waiting entirely and fast-skip the
+                # rest. Skipped symbols stay uncached and get fetched on a
+                # later run (the stable actions cache fills the gaps over
+                # 2-3 runs). Long waits (60s/5min) made runs look stuck ->
+                # users/GitHub cancelled them -> the cache never saved ->
+                # every run refetched everything -> 429s forever. This
+                # version ALWAYS completes.
                 bars = None
-                # Smart 429 handling: on rate-limit, wait 60s ONCE and retry
-                # once. If still limited, skip the symbol (don't burn 3
-                # retries x 60s per symbol - that's what made runs crawl at
-                # 1 min/symbol). If 5+ consecutive 429s, pause 5 min (Dhan
-                # hourly limit cooling) before continuing.
-                consecutive_429 = 0
                 for attempt in range(2):
                     try:
                         bars = client.get_daily(sym, start, end)
-                        consecutive_429 = 0
+                        consec_429 = 0
                         break
                     except Exception as e:  # noqa: BLE001
                         if "429" in str(e):
-                            consecutive_429 += 1
-                            if consecutive_429 >= 5:
-                                print(f"    ! {consecutive_429} consecutive 429s "
-                                      f"-> cooling 5 min", flush=True)
-                                time.sleep(300)
-                                consecutive_429 = 0
-                                continue
-                            if attempt == 0:
-                                print(f"    429 on {sym} -> wait 60s, retry once",
-                                      flush=True)
-                                time.sleep(60)
+                            consec_429 += 1
+                            if consec_429 >= 10:
+                                fast_skip = True
+                            if attempt == 0 and not fast_skip:
+                                time.sleep(5)  # short pause, retry once
                             else:
-                                print(f"    {sym} still 429 after retry -> skip",
-                                      flush=True)
+                                skipped_429 += 1
                         else:
                             raise
                 if bars is None or len(bars.get("close", [])) < cfg.min_bars:
                     errors += 1
+                    if i % 50 == 0 and skipped_429:
+                        print(f"  ... {i}/{len(symbols)} done, "
+                              f"{skipped_429} rate-limited so far "
+                              f"(will be fetched on the next run)",
+                              flush=True)
                     continue
                 # ensure ISO dates (Dhan returns epoch seconds - MUST convert
                 # with _iso_date, not str()[:10] which keeps the epoch)
@@ -623,6 +625,10 @@ def main() -> int:
         xlsx = os.path.splitext(args.out)[0] + ".xlsx"
         write_excel(rows, xlsx)
 
+    if skipped_429:
+        print(f"NOTE: {skipped_429} symbols were skipped due to Dhan rate "
+              f"limit. Run the backtest again later - the daily-bar cache "
+              f"means only the skipped symbols need fetching.")
     print_summary(rows, errors, time.time() - t0, cfg)
     return 0
 
