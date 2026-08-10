@@ -106,6 +106,49 @@ def _write_csv(rows: list[dict], path: str) -> None:
 # intraday (live market) helpers
 # --------------------------------------------------------------------------
 
+def _yf_daily(sym: str, from_date, to_date):
+    """Instant yfinance fallback for a symbol (Dhan -> Yahoo, no waiting)."""
+    try:
+        import yfinance as yf
+        yf_sym = {"SPR_AUTO": "SHRIPISTON"}.get(sym, sym)
+        df = yf.Ticker(f"{yf_sym}.NS").history(
+            start=from_date, end=to_date, auto_adjust=True)
+        if df is None or df.empty:
+            return None
+        df = df.dropna(subset=["Open", "High", "Low", "Close"])
+        return {
+            "open": df["Open"].to_numpy(float),
+            "high": df["High"].to_numpy(float),
+            "low": df["Low"].to_numpy(float),
+            "close": df["Close"].to_numpy(float),
+            "volume": df["Volume"].to_numpy(float),
+            "dates": [d.date().isoformat() for d in df.index],
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _yf_intraday_partial(sym: str, date):
+    """yfinance fallback for today's partial candle (15m bars -> 1 daily bar)."""
+    try:
+        import yfinance as yf
+        yf_sym = {"SPR_AUTO": "SHRIPISTON"}.get(sym, sym)
+        df = yf.Ticker(f"{yf_sym}.NS").history(
+            period="1d", interval="15m", auto_adjust=True)
+        if df is None or df.empty:
+            return None
+        return {
+            "open": float(df["Open"].iloc[0]),
+            "high": float(df["High"].max()),
+            "low": float(df["Low"].min()),
+            "close": float(df["Close"].iloc[-1]),
+            "volume": float(df["Volume"].sum()),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+
 def merge_partial(bars: dict, partial: dict, today: str):
     """
     Append a partial (intraday-so-far) candle to a daily bars dict.
@@ -262,14 +305,21 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     total = len(symbols)
 
     def scan_one(sym: str):
-        """Fetch + detect for one symbol. Returns (sig, err, pref_skipped)."""
+        """Fetch + detect for one symbol. Returns (sig, err, pref_skipped).
+        PRIMARY = Dhan; on ANY failure, INSTANT yfinance fallback (no wait)."""
+        # ---- 1) Dhan ----
+        bars = None
+        dhan_err = ""
         try:
             bars = client.get_daily(sym, from_date, to_date,
                                     force_refresh=force_refresh)
         except Exception as e:  # noqa: BLE001
-            return None, str(e), False
+            dhan_err = str(e)[:60]
         if bars is None or len(bars.get("close", [])) < cfg.min_bars:
-            return None, "", False
+            # ---- 2) instant yfinance fallback ----
+            bars = _yf_daily(sym, from_date, to_date)
+            if bars is None:
+                return None, dhan_err or "no data (dhan+yf failed)", False
 
         # ---- normalize dates to ISO (epoch-safe, cache-safe) ----
         from dhan_client import _iso_date
@@ -285,10 +335,13 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         if intraday:
             last_d = bars["dates"][-1] if bars["dates"] else ""
             if last_d < today_s:
+                partial = None
                 try:
                     partial = client.intraday_partial(sym, to_date)
                 except Exception:  # noqa: BLE001
                     partial = None
+                if partial is None:
+                    partial = _yf_intraday_partial(sym, to_date)  # fallback
                 if partial:
                     bars, live_merged = merge_partial(bars, partial, today_s)
 

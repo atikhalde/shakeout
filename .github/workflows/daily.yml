@@ -45,7 +45,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install numpy requests
+        run: pip install numpy requests yfinance
       - name: Run test suite
         run: python tests.py
 
@@ -60,7 +60,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install numpy requests
+        run: pip install numpy requests yfinance
 
       # ---- verify secrets end-to-end without scanning anything ----
       - name: Telegram connectivity test
