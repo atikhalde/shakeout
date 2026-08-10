@@ -541,48 +541,48 @@ def main() -> int:
     for i, sym in enumerate(symbols, 1):
         try:
             if args.source == "dhan":
-                # ----- YESTERDAY'S PROVEN LOGIC: serial, single request ----
+                # ----- PRIMARY = DHAN: try once, NO waiting/retries ----
                 bars = None
-                for attempt in range(2):
-                    try:
-                        bars = client.get_daily(sym, start, end)
-                        break
-                    except Exception as e:  # noqa: BLE001
-                        if "429" in str(e):
-                            rate_limit_streak += 1
-                            if attempt == 0:
-                                # wait 30s once, then retry (like yesterday)
-                                print(f"    429 on {sym} -> wait 30s, "
-                                      f"retry once", flush=True)
-                                time.sleep(30)
-                            else:
-                                skipped_429 += 1
-                        else:
-                            raise
-                # ----- RATE-LIMIT FAILOVER: if Dhan persistently 429s,
-                #       switch the REST of the run to yfinance so the
-                #       backtest always completes (useful when running
-                #       from a foreign IP that Dhan throttles) ----
-                if rate_limit_streak >= 3:
-                    print(f"\n>>> Dhan rate-limiting ({rate_limit_streak} "
-                          f"consecutive 429s). Switching the REST of the "
-                          f"run to yfinance so the backtest still "
-                          f"completes. (Signal stats are close enough for "
-                          f"win-rate analysis.)\n", flush=True)
-                    args.source = "yfinance"
-                    rate_limit_streak = 0
-                    continue
+                dhan_err = ""
+                try:
+                    bars = client.get_daily(sym, start, end)
+                except Exception as e:  # noqa: BLE001
+                    dhan_err = str(e)[:80]
                 if bars is None or len(bars.get("close", [])) < cfg.min_bars:
-                    errors += 1
                     if bars is None:
-                        raw = getattr(client, "_last_raw", "")[:120]
-                        reason = f"none [dhan: {raw}]" if raw else "none"
+                        raw = getattr(client, "_last_raw", "")[:100]
+                        dhan_err = dhan_err or f"none [dhan: {raw}]"
                     else:
-                        reason = f"only {len(bars.get('close', []))} bars"
-                    print(f"  {i}/{len(symbols)} {sym:12s} no data ({reason})",
-                          flush=True)
-                    continue
-                bars["dates"] = [_iso_date(d) for d in bars["dates"]]
+                        dhan_err = dhan_err or "too few bars"
+                    # ----- INSTANT FAILOVER to yfinance for THIS symbol ----
+                    # (no waiting: Dhan failed -> fetch from Yahoo right now)
+                    try:
+                        import yfinance as yf
+                        yf_sym = {"SPR_AUTO": "SHRIPISTON"}.get(sym, sym)
+                        df = yf.Ticker(f"{yf_sym}.NS").history(
+                            start=start, end=end, auto_adjust=True)
+                        if df is not None and not df.empty:
+                            df = df.dropna(subset=["Open", "High", "Low", "Close"])
+                            bars = {
+                                "open": df["Open"].to_numpy(float),
+                                "high": df["High"].to_numpy(float),
+                                "low": df["Low"].to_numpy(float),
+                                "close": df["Close"].to_numpy(float),
+                                "volume": df["Volume"].to_numpy(float),
+                                "dates": [d.date().isoformat() for d in df.index],
+                            }
+                            skipped_429 += 1  # counted as yfinance fallback
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if bars is None or len(bars.get("close", [])) < cfg.min_bars:
+                        errors += 1
+                        print(f"  {i}/{len(symbols)} {sym:12s} FAIL "
+                              f"(dhan: {dhan_err[:70]})", flush=True)
+                        continue
+                    print(f"  {i}/{len(symbols)} {sym:12s} yfinance-fallback "
+                          f"(dhan: {dhan_err[:50]})", flush=True)
+                else:
+                    bars["dates"] = [_iso_date(d) for d in bars["dates"]]
             else:
                 import yfinance as yf
                 yf_sym = {"SPR_AUTO": "SHRIPISTON"}.get(sym, sym)
@@ -641,9 +641,10 @@ def main() -> int:
         write_excel(rows, xlsx)
 
     if skipped_429:
-        print(f"NOTE: {skipped_429} symbols were skipped due to Dhan "
-              f"rate limit. Run the backtest again later - the daily-bar "
-              f"cache means only the skipped symbols need fetching.")
+        print(f"NOTE: {skipped_429} symbols used the yfinance fallback "
+              f"(Dhan failed for them). Data is close enough for win-rate "
+              f"analysis; re-run later when Dhan allows to use Dhan data "
+              f"for those symbols.")
     print_summary(rows, errors, time.time() - t0, cfg)
     return 0
 
