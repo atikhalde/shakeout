@@ -298,6 +298,8 @@ class DhanClient:
         if not force_refresh and os.path.exists(cache_file):
             bars = self._read_cache(cache_file)
             if bars and bars["dates"] and bars["dates"][-1] >= to_date.isoformat():
+                bars["symbol"] = symbol  # cache drops the symbol key - the
+                # scanner's alerts need it (else "PATTERN SIGNAL — ?")
                 return self._slice(bars, from_date, to_date)
 
         # SINGLE request - the version proven to work (yesterday + today's

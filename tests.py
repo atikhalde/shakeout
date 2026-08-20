@@ -56,6 +56,15 @@ def test_positives() -> None:
                   sig["min_close_after_ssl"] > sig["ssl"])
             check(f"{sym} still below peak (before big move)",
                   sig["last_close"] < sig["peak"])
+            # trade plan must be a valid LONG: stop < entry < target, rr>0
+            # (regression: target used to be anchored to the SSL zone, so a
+            #  close above SSL*1.08 gave target < entry and NEGATIVE R:R)
+            tp_ok = (sig["stop_level"] < sig["last_close"]
+                     < sig["target_level"] and sig["rr"] > 0)
+            check(f"{sym} trade plan sane (stop<entry<target, rr>0)",
+                  tp_ok,
+                  f"stop={sig['stop_level']:.2f} entry={sig['last_close']:.2f} "
+                  f"target={sig['target_level']:.2f} rr={sig['rr']:.2f}")
 
 
 def test_telegram_format() -> None:
@@ -94,10 +103,69 @@ def test_telegram_format() -> None:
     check("telegram renders epoch as date", "2026-" in msg2
           and str(1785695400) not in msg2)
 
+    # regression: the user's real alert (close 1130.60 / SSL 999.63) used to
+    # render "Target ₹1079.61 (+-4.5%) · R:R -0.39" because the target was
+    # anchored to the SSL zone (999.63*1.08=1079.61 < entry). It must now
+    # be entry-based: target = close*1.08 = 1221.05, positive R:R.
+    sig_user = dict(sig, symbol="USERX", score=74.0, signal_date="2026-08-18",
+                    last_close=1130.60, ssl=999.63, stop_level=999.63,
+                    target_level=round(1130.60 * 1.08, 2),
+                    rr=(1130.60 * 1.08 - 1130.60) / (1130.60 - 999.63))
+    msg_user = TelegramNotifier.format_signal(sig_user)
+    check("trade plan target above entry",
+          "Target ₹1221.05 (+8.0%)" in msg_user, msg_user)
+    check("trade plan R:R positive", "R:R 0.69" in msg_user, msg_user)
+    check("trade plan has no '+-' sign glitch", "+-" not in msg_user)
+    check("trade plan stop below entry",
+          "Stop ₹999.63 (−11.6%)" in msg_user, msg_user)
+    check("alert still names the stock", "USERX" in msg_user)
+
     summary = TelegramNotifier.format_summary(3)
     check("summary with signals", "3 signals" in summary)
     summary0 = TelegramNotifier.format_summary(0)
     check("summary without signals", "No pattern signals" in summary0)
+
+
+def test_symbol_in_alerts() -> None:
+    """Regression: alerts must always carry the stock symbol. The Dhan
+    cache-read path and the yfinance fallback used to drop the 'symbol'
+    key, so live alerts could arrive as 'PATTERN SIGNAL — ?'."""
+    print("== symbol always present (cache read / yfinance fallback) ==")
+    import datetime as dt
+    import os
+    import tempfile
+    import unittest.mock as mock
+
+    from dhan_client import DhanClient
+    import scanner as scanner_mod
+
+    # ---- Dhan cache path: the symbol must be restored on cache reads ----
+    tmp = tempfile.mkdtemp()
+    with open(os.path.join(tmp, "RELIANCE.csv"), "w", newline="") as f:
+        f.write("date,open,high,low,close,volume\n")
+        for i in range(1, 6):
+            f.write(f"2026-08-0{i},100,105,99,102,1000\n")
+    client = DhanClient("fake", cache_dir=tmp, min_interval=0.0)
+    bars = client.get_daily("RELIANCE", dt.date(2026, 8, 1), dt.date(2026, 8, 5))
+    check("cache read keeps symbol",
+          bars is not None and bars.get("symbol") == "RELIANCE",
+          f"symbol={bars.get('symbol') if bars else None}")
+
+    # ---- yfinance fallback: the payload must include the symbol ----
+    import pandas as pd
+    idx = pd.to_datetime(["2026-08-01", "2026-08-02", "2026-08-03"])
+    df = pd.DataFrame({
+        "Open": [100.0, 102.0, 101.0], "High": [105.0, 106.0, 104.0],
+        "Low": [99.0, 100.0, 99.0], "Close": [102.0, 104.0, 103.0],
+        "Volume": [1000, 1100, 900],
+    }, index=idx)
+    with mock.patch("yfinance.Ticker") as tk:
+        tk.return_value.history.return_value = df
+        got = scanner_mod._yf_daily("SPORTKING", dt.date(2026, 7, 1),
+                                    dt.date(2026, 8, 5))
+    check("yfinance fallback keeps symbol",
+          got is not None and got.get("symbol") == "SPORTKING",
+          f"symbol={got.get('symbol') if got else None}")
 
 
 def test_universe() -> None:
@@ -257,8 +325,10 @@ def test_run_live_unpack() -> None:
             return ["SPORTKING", "BAJFINANCE", "SPR_AUTO"]
         def resolve_symbol(self, s): return "1"
         def get_daily(self, sym, *a, **k):
-            b = {kk: list(vv) for kk, vv in _bars.items()}
-            b["symbol"] = sym
+            # deliberately DROP the symbol (like a cache read / yfinance
+            # fallback would) - scanner must restore it before alerting
+            b = {kk: list(vv) for kk, vv in _bars.items()
+                 if kk != "symbol"}
             return b
         def intraday_partial(self, *a, **k): return None
 
@@ -272,6 +342,10 @@ def test_run_live_unpack() -> None:
         )
     check("run_live completes without crash", rows is not None)
     check("run_live returns a list", isinstance(rows, list))
+    check("run_live signals carry the symbol (not '?')",
+          rows and all(r.get("symbol") and r["symbol"] != "?"
+                       for r in rows),
+          f"symbols={[r.get('symbol') for r in rows] if rows else 'none'}")
 
 
 def test_backtest_finds_verified_stocks() -> None:
@@ -371,6 +445,7 @@ def main() -> int:
     test_indicators()
     test_telegram_format()
     test_intraday()
+    test_symbol_in_alerts()
     test_universe()
     test_positives()
     test_aci_26w_proximity()

@@ -12,6 +12,7 @@ Test it instantly (sends the demo signals to your phone):
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 import requests
@@ -73,6 +74,14 @@ class TelegramNotifier:
         return s[:10]
 
     @staticmethod
+    def _pct(x: float) -> str:
+        """Signed percentage with one decimal, e.g. '+8.0%' / '−4.5%'.
+        (Never emits the broken '+−4.5%' style - the old format hardcoded
+        '+' and produced '+-4.5%' when the target was below the entry.)"""
+        sign = "+" if x >= 0 else "−"
+        return f"{sign}{abs(x):.1f}%"
+
+    @staticmethod
     def format_signal(sig: dict) -> str:
         s = sig
         live = bool(s.get("intraday"))
@@ -96,17 +105,26 @@ class TelegramNotifier:
 
         # ---- defined-risk trade plan (entry/stop/target/R:R) ----
         stop = s.get("stop_level") or s["ssl"]
-        target = s.get("target_level") or s["ssl"] * 1.08
+        # entry-based fallback: target = entry + 8% (same basis pattern.py
+        # uses; anchoring to SSL produced targets BELOW the entry)
+        target = s.get("target_level") or s["last_close"] * 1.08
         close = s["last_close"]
-        stop_pct = (close - stop) / close * 100
-        tgt_pct = (target - close) / close * 100
+        stop_pct = (close - stop) / close * 100   # >0 -> stop below entry
+        tgt_pct = (target - close) / close * 100  # >0 -> target above entry
         rr = s.get("rr")
-        rr_s = f"{rr:.2f}" if rr is not None else "?"
+        rr_s = "?"
+        if rr is not None:
+            try:
+                if not (isinstance(rr, float) and math.isnan(float(rr))):
+                    rr_s = f"{float(rr):.2f}"
+            except (TypeError, ValueError):
+                pass
         surge = s.get("vol_surge")
         surge_s = f"{surge:.2f}x" if surge else "n/a"
         plan_line = (
             f"🎯 <b>TRADE PLAN</b> — Entry ₹{close:.2f} · Stop ₹{stop:.2f} "
-            f"(−{stop_pct:.1f}%) · Target ₹{target:.2f} (+{tgt_pct:.1f}%) · "
+            f"({TelegramNotifier._pct(-stop_pct)}) · "
+            f"Target ₹{target:.2f} ({TelegramNotifier._pct(tgt_pct)}) · "
             f"R:R {rr_s}\n"
             f"🔥 Reversal volume {surge_s} of 20d avg <i>(info)</i>"
         )

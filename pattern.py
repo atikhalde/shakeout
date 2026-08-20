@@ -173,6 +173,19 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
     if avg_volume(vols, cfg.volume_lookback) < cfg.min_avg_volume:
         return None
 
+    # ---- defined-risk trade plan (entry/stop/target/R:R) ----
+    # entry  = the signal-day close (the backtest enters on the NEXT
+    #          open; the alert uses the close as the reference entry).
+    # stop   = just below the SSL zone (structural invalidation).
+    # target = entry + the "+8% big-move pop" - the SAME basis the
+    #          backtest's big_move flag uses (best close within 15d
+    #          >= +8% vs entry). Anchoring the target to SSL instead
+    #          of the entry made the plan nonsense whenever the close
+    #          had already bounced above SSL*1.08: target below entry,
+    #          negative R:R, and "+-4.5%" in the alert.
+    entry = float(c[t])
+    big_move_target = entry * (1.0 + cfg.big_move_pct / 100.0)
+
     # ------------------------------------------------------------- assemble
     signal = {
         "symbol": bars.get("symbol", "?"),
@@ -195,16 +208,13 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
         "body_ratio": (c[t] - o[t]) / rng,
         "retrace_pct": (peak - flush_low) / max(peak - ssl, 1e-9) * 100.0,
         "days_since_bos": t - bos_day,
-        # distance from the current close to the "big move" target
-        # (Sportking-style +8% pop): how much headroom remains
         "big_move_pct": cfg.big_move_pct,
-        "big_move_headroom_pct": (1 + cfg.big_move_pct / 100.0
-                                  ) * ssl / max(c[t], 1e-9) - 1.0,
-        # ---- defined-risk trade plan (entry/stop/target/R:R) ----
+        # headroom from the current close to the big-move target (fraction)
+        "big_move_headroom_pct": (big_move_target
+                                  / max(entry, 1e-9) - 1.0),
         "stop_level": ssl,                       # stop = below SSL
-        "target_level": ssl * (1 + cfg.big_move_pct / 100.0),  # SSL + 8%
-        "rr": ((ssl * (1 + cfg.big_move_pct / 100.0) - c[t])
-               / max(c[t] - ssl, 1e-9)),
+        "target_level": big_move_target,         # entry + big-move %
+        "rr": (big_move_target - entry) / max(entry - ssl, 1e-9),
         "vol_surge": float(
             v[t] / max(float(np.mean(v[t - 20:t])) if t >= 20
                        else float(np.mean(v[:t])), 1e-9)
