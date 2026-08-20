@@ -117,6 +117,7 @@ def _yf_daily(sym: str, from_date, to_date):
             return None
         df = df.dropna(subset=["Open", "High", "Low", "Close"])
         return {
+            "symbol": sym,
             "open": df["Open"].to_numpy(float),
             "high": df["High"].to_numpy(float),
             "low": df["Low"].to_numpy(float),
@@ -324,6 +325,10 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         # ---- normalize dates to ISO (epoch-safe, cache-safe) ----
         from dhan_client import _iso_date
         bars["dates"] = [_iso_date(d) for d in bars["dates"]]
+        # the symbol is dropped by some sources (Dhan cache reads, the
+        # yfinance fallback) - without it the Telegram alert arrives as
+        # "PATTERN SIGNAL — ?" and you can't tell which stock it is
+        bars["symbol"] = sym
 
         # ---- prefilter: weekly RSI/MACD + close>100 + green daily ----
         if cfg.prefilter_enabled:

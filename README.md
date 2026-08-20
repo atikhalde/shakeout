@@ -337,7 +337,8 @@ Reference results (Yahoo data, 90 large/mid-caps, 2 years, score>=55):
 
 The default `score_threshold` is now **60** (was 55) — the backtest shows
 score >= 60 gives ~83% 5-day win vs 71% overall. Alerts also show the
-**big-move target** (SSL + 8%) and the **3–7 day trade horizon**.
+**big-move target** (entry + 8%, the same basis the backtest's `big_move`
+flag uses) and the **3–7 day trade horizon**.
 
 Tips:
 - Start with `--limit 300` (~2 min) to see the speed, then `--limit 0`
@@ -356,14 +357,15 @@ pattern (it fires right after a flush, often in weak markets). So:
 | Implemented | Dropped (would have killed the best trades) |
 |---|---|
 | ✅ **Score >= 70** default alert threshold (backtest: 25% big-move rate vs 18% at 60) | ❌ Volume-surge as a hard filter (reversal days were 0.6-0.8x, not 1.5x) |
-| ✅ **Trade plan in every alert**: Entry = close, Stop = below SSL, Target = SSL+8%, R:R | ❌ NIFTY-regime gate (NIFTY was below its 20-EMA on all 3 signal days) |
+| ✅ **Trade plan in every alert**: Entry = close, Stop = below SSL, Target = entry+8% (big-move pop), R:R = (target−entry)/(entry−stop) — always a valid LONG | ❌ NIFTY-regime gate (NIFTY was below its 20-EMA on all 3 signal days) |
 | ✅ **Volume surge shown as INFO** (not a filter) | |
 | ✅ **Signal tracking sheet** (`signals_tracker.csv`): every alert logged with entry/stop/target/rr; marked HIT/MISS ~5 sessions later automatically | |
 | ✅ **Exit discipline**: pattern is a 3-7 day bounce; book profit around +6% (`take_profit_pct`) | |
 
-Example alert section:
+Example alert section (target = entry + 8%, so it is always ABOVE the
+entry and R:R is always positive):
 ```
-🎯 TRADE PLAN — Entry ₹201.44 · Stop ₹194.80 (−3.3%) · Target ₹210.38 (+4.4%) · R:R 1.35
+🎯 TRADE PLAN — Entry ₹201.44 · Stop ₹194.80 (−3.3%) · Target ₹217.56 (+8.0%) · R:R 2.43
 🔥 Reversal volume 1.96x of 20d avg (info)
 ```
 Track: `python tracker.py --report`
