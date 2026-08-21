@@ -33,6 +33,8 @@ import datetime as dt
 import os
 import sys
 
+import numpy as np
+
 from config import ScanConfig
 from env_loader import load_env
 from pattern import detect_setup
@@ -161,8 +163,18 @@ def merge_partial(bars: dict, partial: dict, today: str):
     """
     if bars.get("dates") and bars["dates"][-1] >= today:
         return bars, False
-    b = {k: list(v) for k, v in bars.items() if isinstance(v, list)}
-    b["dates"] = list(bars["dates"])
+    # bars may come from Dhan (python lists) OR the yfinance fallback
+    # (numpy arrays) - coerce every sequence to a list and KEEP scalar
+    # keys like 'symbol' (dropping it made live alerts show "?" again).
+    ohlcv = ("dates", "open", "high", "low", "close", "volume")
+    if any(k not in bars for k in ohlcv):
+        return bars, False          # malformed input -> merge nothing
+    b = {}
+    for k, v in bars.items():
+        if isinstance(v, (list, tuple)) or isinstance(v, np.ndarray):
+            b[k] = list(v)
+        else:
+            b[k] = v                # 'symbol', flags, etc.
     b["dates"].append(today)
     b["open"].append(partial["open"])
     b["high"].append(partial["high"])
@@ -348,7 +360,13 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                 if partial is None:
                     partial = _yf_intraday_partial(sym, to_date)  # fallback
                 if partial:
-                    bars, live_merged = merge_partial(bars, partial, today_s)
+                    try:
+                        bars, live_merged = merge_partial(bars, partial,
+                                                          today_s)
+                    except Exception:  # noqa: BLE001
+                        # a bad partial for ONE symbol must never kill the
+                        # whole scan - fall back to completed daily bars
+                        live_merged = False
 
         sig = detect_setup(bars, bars["dates"], cfg)
         if sig and sig.get("score", 0) < cfg.score_threshold:

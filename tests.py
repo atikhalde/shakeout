@@ -213,6 +213,39 @@ def test_intraday() -> None:
     check("no duplicate when today already present",
           used2 is False and len(m2["dates"]) == 1)
 
+    # ---- REGRESSION: bars from the yfinance fallback are numpy arrays,
+    #      not lists - merge_partial crashed with KeyError: 'open' and
+    #      took down every intraday GitHub Actions run (exit code 1) ----
+    import numpy as _np
+    bars_np = {
+        "symbol": "SPORTKING",
+        "dates": ["2026-07-29", "2026-07-30"],
+        "open": _np.array([198.0, 200.0]),
+        "high": _np.array([205.0, 210.0]),
+        "low": _np.array([196.0, 195.0]),
+        "close": _np.array([199.0, 201.4]),
+        "volume": _np.array([2_100_000.0, 2_600_000.0]),
+    }
+    try:
+        m3, used3 = merge_partial(bars_np, partial, "2026-07-31")
+        check("numpy bars merge without crash", used3 is True)
+        check("numpy bars appended OHLC",
+              m3["close"][-1] == 225.0 and m3["dates"][-1] == "2026-07-31")
+        check("numpy bars keep the symbol", m3.get("symbol") == "SPORTKING")
+    except Exception as e:  # noqa: BLE001
+        check("numpy bars merge without crash", False, f"{type(e).__name__}: {e}")
+
+    # ---- REGRESSION: merging must not drop scalar keys like 'symbol'
+    #      (dropping it re-broke the "PATTERN SIGNAL — ?" alert bug) ----
+    bars_sym = {
+        "symbol": "BAJFINANCE",
+        "dates": ["2026-07-30"], "open": [200.0], "high": [210.0],
+        "low": [195.0], "close": [201.4], "volume": [2_600_000],
+    }
+    m4, used4 = merge_partial(bars_sym, partial, "2026-07-31")
+    check("list bars keep the symbol",
+          used4 is True and m4.get("symbol") == "BAJFINANCE")
+
     # ---- intraday payload parsing (list-of-lists format) ----
     class FakeResp:
         def __init__(self, payload): self._p = payload
