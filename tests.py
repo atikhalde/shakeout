@@ -597,6 +597,79 @@ def test_fail_fast_dhan_to_yfinance() -> None:
               isinstance(err, DhanAuthError))
 
 
+def test_run_live_all_scan_one_paths() -> None:
+    """
+    Regression (found in pre-merge review): scan_one returned 3-tuples on
+    its error and prefilter-skip paths while run_live unpacked 4 values -
+    the FIRST prefilter-skipped or data-failed symbol would crash the whole
+    live scan with ValueError (the same bug class PR #2 fixed for 2->3).
+    Exercise ALL THREE paths (error / prefilter-skip / signal) end-to-end.
+    """
+    print("== run_live: error + prefilter-skip + signal paths together ==")
+    import os
+    import tempfile
+    import unittest.mock as mock
+    import scanner as scanner_mod
+    import dhan_client as dhan_mod
+    from demo_data import demo_universe
+
+    _dates, _bars, _exp = demo_universe()["SPORTKING"]
+    _bars = {k: list(v) for k, v in _bars.items()}
+    _bars["dates"] = list(_dates)
+
+    n = 180
+    red_bars = {
+        "dates": [f"2026-{i//30+1:02d}-{i%28+1:02d}" for i in range(n)],
+        "open": [100.0 + i * 0.1 for i in range(n)],
+        "high": [103.0 + i * 0.1 for i in range(n)],
+        "low": [97.0 + i * 0.1 for i in range(n)],
+        "close": [98.0 + i * 0.1 for i in range(n)],  # close<open -> prefilter
+        "volume": [1e6] * n,
+    }
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def get_instruments(self):
+            return {"GOOD": "1", "REDS": "2", "NODATA": "3"}
+        def liquid_universe(self):
+            return ["GOOD", "REDS", "NODATA"]
+        def resolve_symbol(self, s): return "1"
+        def get_daily(self, sym, *a, **k):
+            if sym == "GOOD":
+                return {kk: list(vv) for kk, vv in _bars.items()}
+            if sym == "REDS":
+                return {k2: list(v2) for k2, v2 in red_bars.items()}
+            return None                     # NODATA: Dhan has nothing
+        def intraday_partial(self, *a, **k): return None
+
+    wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
+    with open(wl, "w") as f:
+        f.write("GOOD\nREDS\nNODATA\n")
+
+    cfg = ScanConfig()
+    cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "tracker.csv")
+
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with mock.patch.object(dhan_mod, "DhanClient", FakeClient), \
+         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None):
+        with contextlib.redirect_stdout(buf):
+            rows = scanner_mod.run_live(
+                cfg, "tok", "cid", limit=0, watchlist=wl, from_days=400,
+                force_refresh=False, debug=False, intraday=False,
+                notifier=None)
+    out = buf.getvalue()
+    check("all 3 paths survive one run (no unpack crash)", rows is not None)
+    check("signal path still works", len(rows) == 1
+          and rows[0]["symbol"] == "GOOD",
+          f"rows={[(r['symbol'], r['score']) for r in rows]}")
+    check("error path counted (NODATA)",
+          "1 errors" in out and "NODATA" in out)
+    check("prefilter path counted (REDS)",
+          "1 prefilter-skipped" in out, out.splitlines()[-3:])
+
+
 def test_backtest_finds_verified_stocks() -> None:
     """Regression: the backtest must find the 3 verified stocks on their
     exact signal dates (demo data), with ISO dates and recent flag."""
@@ -703,6 +776,7 @@ def main() -> int:
     test_run_live_unpack()
     test_cross_run_cooldown_and_summary()
     test_fail_fast_dhan_to_yfinance()
+    test_run_live_all_scan_one_paths()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1

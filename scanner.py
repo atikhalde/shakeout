@@ -320,7 +320,10 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     _auth_warned = [False]   # one-time "Dhan token dead" console warning
 
     def scan_one(sym: str):
-        """Fetch + detect for one symbol. Returns (sig, err, pref_skipped).
+        """Fetch + detect for one symbol. Returns a 4-tuple
+        (sig, err, pref_skipped, near_miss) - EVERY path must return all
+        four or run_live's unpack crashes the whole scan (the exact class
+        of bug PR #2 fixed for 3-tuples).
         PRIMARY = Dhan; on ANY failure, INSTANT yfinance fallback (no wait)."""
         # ---- 1) Dhan ----
         bars = None
@@ -344,7 +347,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             # ---- 2) instant yfinance fallback ----
             bars = _yf_daily(sym, from_date, to_date)
             if bars is None:
-                return None, dhan_err or "no data (dhan+yf failed)", False
+                return None, dhan_err or "no data (dhan+yf failed)", False, None
 
         # ---- normalize dates to ISO (epoch-safe, cache-safe) ----
         from dhan_client import _iso_date
@@ -358,7 +361,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         if cfg.prefilter_enabled:
             ok, why = passes_prefilter(bars, cfg)
             if not ok:
-                return None, "", True
+                return None, "", True, None
 
         live_merged = False
         if intraday:
