@@ -40,7 +40,7 @@ from env_loader import load_env
 from pattern import detect_setup
 from prefilter import load_mcap, mcap_filter, passes_prefilter
 from telegram_notifier import TelegramNotifier
-from tracker import log_signal, update_open
+from tracker import log_signal, recently_alerted, update_open
 
 
 def _table_rows(signals: list[dict]) -> list[dict]:
@@ -244,7 +244,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
              watchlist: str | None, from_days: int, force_refresh: bool,
              debug: bool, intraday: bool = False,
              notifier: TelegramNotifier | None = None) -> list[dict]:
-    from dhan_client import DhanClient
+    from dhan_client import DhanClient, DhanAuthError
     from universes import get_universe
 
     client = DhanClient(token, client_id,
@@ -284,6 +284,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
 
     # ---- prefilter: market cap > X Cr BEFORE any API calls (big win) ----
     pref_skipped = 0
+    mcap = None                    # (else NameError below when prefilter off)
     if cfg.prefilter_enabled:
         mcap = load_mcap(cfg.mcap_file)
         if mcap:
@@ -316,6 +317,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     t0 = _t.time()
     signals, errors = [], 0
     total = len(symbols)
+    _auth_warned = [False]   # one-time "Dhan token dead" console warning
 
     def scan_one(sym: str):
         """Fetch + detect for one symbol. Returns (sig, err, pref_skipped).
@@ -326,6 +328,16 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         try:
             bars = client.get_daily(sym, from_date, to_date,
                                     force_refresh=force_refresh)
+        except DhanAuthError as e:
+            # dead/expired token: the client now fails every call instantly,
+            # so the whole run finishes on the yfinance fallback at full speed
+            dhan_err = f"DhanAuthError: {e}"[:80]
+            if not _auth_warned[0]:
+                _auth_warned[0] = True
+                print("WARNING: Dhan rejected the access token (401/403) - "
+                      "scanning continues on the yfinance fallback only. "
+                      "Rotate DHAN_ACCESS_TOKEN to restore Dhan data.",
+                      file=sys.stderr)
         except Exception as e:  # noqa: BLE001
             dhan_err = str(e)[:60]
         if bars is None or len(bars.get("close", [])) < cfg.min_bars:
@@ -369,22 +381,29 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                         live_merged = False
 
         sig = detect_setup(bars, bars["dates"], cfg)
+        near = None
         if sig and sig.get("score", 0) < cfg.score_threshold:
-            sig = None          # below the alert threshold -> not a signal
+            # below the alert threshold -> not a signal, but remember the
+            # near-misses (score within 15 pts) so the daily summary can
+            # explain WHY a quiet day is quiet ("2 setups scored 62-69")
+            if sig["score"] >= cfg.score_threshold - 15:
+                near = (sym, sig["score"], str(sig["signal_date"])[:10])
+            sig = None
         if sig:
             sig["intraday"] = bool(live_merged)
-        return sig, "", False
+        return sig, "", False, near
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     err_by_type: dict[str, int] = {}
     err_samples: list[str] = []
+    near_misses: list[tuple] = []
     with ThreadPoolExecutor(max_workers=cfg.live_max_workers) as pool:
         futs = {pool.submit(scan_one, s): s for s in symbols}
         done = 0
         for fut in as_completed(futs):
             done += 1
             sym = futs[fut]
-            sig, err, pref = fut.result()
+            sig, err, pref, near = fut.result()
             if err:
                 errors += 1
                 key = err.split(":")[0].split("for url")[0].strip()[:60]
@@ -401,6 +420,8 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                 print(f"  SIGNAL {tag}{sym:12s} score={sig['score']:.0f} "
                       f"signal={sig['signal_date']} ssl={sig['ssl']:.1f} "
                       f"flush={sig['flush_date']}")
+            if near is not None:
+                near_misses.append(near)
             if done % 100 == 0 or done == total:
                 el = _t.time() - t0
                 rate = done / max(el, 1e-6)
@@ -445,6 +466,33 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                   f"{cfg.cooldown_days}d")
         signals = deduped
 
+    # ---- CROSS-RUN cooldown: the tracker sheet remembers every alert, so a
+    #      symbol alerted within cooldown_days does not re-alert on the NEXT
+    #      run (2026-08-19 saw 5 identical re-alerts of the 08-18 signal:
+    #      same setup, same last bar, no memory between runs) ----
+    cooldown_skipped = 0
+    if cfg.cooldown_days > 0 and cfg.tracker_enabled and signals:
+        kept = []
+        for s in signals:
+            try:
+                if recently_alerted(s["symbol"], str(s["signal_date"])[:10],
+                                    cfg.cooldown_days, cfg.tracker_file):
+                    cooldown_skipped += 1
+                    continue
+            except Exception:  # noqa: BLE001  (bad tracker file -> alert anyway)
+                pass
+            kept.append(s)
+        if cooldown_skipped:
+            print(f"cross-run cooldown: suppressed {cooldown_skipped} "
+                  f"re-alert(s) (already alerted within {cfg.cooldown_days}d "
+                  f"per {cfg.tracker_file})")
+        signals = kept
+
+    if near_misses:
+        near_misses.sort(key=lambda x: -x[1])
+        print(f"near-misses (pattern OK, score < {cfg.score_threshold:.0f}): "
+              + ", ".join(f"{s}:{sc:.0f}" for s, sc, _ in near_misses[:10]))
+
     rows = _table_rows(sorted(signals, key=lambda s: -s["score"]))
     _print_table(rows)
 
@@ -461,7 +509,15 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
 
     if notifier is not None:
         scope = f"{len(symbols)} symbols"
-        sent = notifier.send_signals(signals, scope)
+        stats = (f"scanned {len(symbols)} · prefilter-skipped {pref_skipped} "
+                 f"· errors {errors}")
+        if cooldown_skipped:
+            stats += f" · {cooldown_skipped} re-alert(s) suppressed by cooldown"
+        if near_misses:
+            stats += (" · near-misses (score < "
+                      f"{cfg.score_threshold:.0f}): "
+                      + ", ".join(f"{s} {sc:.0f}" for s, sc, _ in near_misses[:5]))
+        sent = notifier.send_signals(signals, scope, stats)
         print(f"Telegram: {sent} messages sent ({scope})")
 
     return rows
@@ -486,7 +542,7 @@ def main(argv=None) -> int:
                    help="live: file with one symbol per line")
     p.add_argument("--out", default=None, help="write results to CSV")
     p.add_argument("--threshold", type=float, default=None,
-                   help="min score to report (default from config: 55)")
+                   help="min score to report (default from config: 70)")
     p.add_argument("--backtest", action="store_true",
                    help="walk history and list all signals in the window")
     p.add_argument("--backtest-days", type=int, default=90)

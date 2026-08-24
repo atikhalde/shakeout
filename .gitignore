@@ -17,6 +17,8 @@ data/cache/
 logs/
 results_*.csv
 backtest_*.csv
+signals_tracker.csv
+signals_*.csv
 
 # ---- editors / OS ----
 .DS_Store

@@ -42,6 +42,37 @@ def write(path: str, rows: list[dict]) -> None:
         w.writerows(rows)
 
 
+def last_alert_date(symbol: str, path: str = "signals_tracker.csv"):
+    """Newest logged signal_date (ISO str) for `symbol`, or None."""
+    best = None
+    for r in read(path):
+        if r.get("symbol") == symbol:
+            d = str(r.get("signal_date", ""))[:10]
+            if d and (best is None or d > best):
+                best = d
+    return best
+
+
+def recently_alerted(symbol: str, as_of: str, days: int = 15,
+                     path: str = "signals_tracker.csv") -> bool:
+    """
+    True if `symbol` was already alerted within `days` calendar days of
+    `as_of` (YYYY-MM-DD). This is the CROSS-RUN cooldown: without it the
+    same setup re-alerts on every scanner run that still sees the same
+    last bar (e.g. 5 identical alerts on 2026-08-19 for the 2026-08-18
+    signal), which makes repeats look like noise and silence look like a bug.
+    """
+    last = last_alert_date(symbol, path)
+    if last is None:
+        return False
+    try:
+        gap = (dt.date.fromisoformat(as_of[:10])
+               - dt.date.fromisoformat(last)).days
+    except ValueError:
+        return False
+    return 0 <= gap <= days
+
+
 def log_signal(sig: dict, path: str = "signals_tracker.csv") -> bool:
     """Append a signal (deduped by symbol+date). Returns True if added."""
     rows = read(path)

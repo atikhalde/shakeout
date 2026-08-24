@@ -158,23 +158,29 @@ class TelegramNotifier:
         return msg + note
 
     @staticmethod
-    def format_summary(n_signals: int, scope: str = "NSE universe") -> str:
+    def format_summary(n_signals: int, scope: str = "NSE universe",
+                       stats: str = "") -> str:
+        # optional one-line scan telemetry so "no signals" is explainable
+        # (scanned/errors/near-misses) instead of a silent black box
+        tail = f"\n⚙️ {stats}" if stats else ""
         if n_signals:
             return (f"🔍 <b>Scan complete</b> ({scope})\n"
-                    f"{n_signals} signal{'s' if n_signals != 1 else ''} fired.")
+                    f"{n_signals} signal{'s' if n_signals != 1 else ''} "
+                    f"fired.{tail}")
         return (f"🔍 <b>Scan complete</b> ({scope})\n"
                 f"No pattern signals today. Setup needs: recent BOS → sudden "
                 f"flush to SSL zone (no close below) → strong green reversal "
-                f"candle, still below peak.")
+                f"candle, still below peak.{tail}")
 
     # ----------------------------------------------------------- batch helpers
-    def send_signals(self, signals: list[dict], scope: str = "NSE universe") -> int:
+    def send_signals(self, signals: list[dict], scope: str = "NSE universe",
+                     stats: str = "") -> int:
         """Send one message per signal + a summary. Returns # messages sent."""
         sent = 0
         for sig in sorted(signals, key=lambda s: -s["score"]):
             if self.send(self.format_signal(sig)):
                 sent += 1
             time.sleep(0.3)  # be gentle with Telegram's limits
-        if self.send(self.format_summary(len(signals), scope)):
+        if self.send(self.format_summary(len(signals), scope, stats)):
             sent += 1
         return sent

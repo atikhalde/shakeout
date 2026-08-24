@@ -91,6 +91,22 @@ def _iso_date(ts) -> str:
     return s[:10]
 
 
+class DhanAuthError(RuntimeError):
+    """
+    Dhan rejected our token (401/403). Retrying is pointless and waiting is
+    worse - the scanner must drop to the yfinance fallback for the REST of
+    the run without paying another round-trip per symbol.
+    """
+
+
+class DhanThrottledError(RuntimeError):
+    """
+    Dhan answered 429 (or we are inside the cool-off window right after one).
+    No retry, no waiting: raise instantly so this symbol goes to the
+    yfinance fallback immediately; Dhan resumes after the short pause.
+    """
+
+
 class DhanClient:
     def __init__(self, token: str, client_id: Optional[str] = None,
                  cache_dir: str = "data/cache",
@@ -106,9 +122,28 @@ class DhanClient:
         self._lock = threading.Lock()
         self._instruments: Optional[dict[str, str]] = None
         self._last_raw: str = ""
+        # ---- fail-fast state (instant yfinance fallback, never wait) ----
+        self._auth_dead = False       # set on the first 401/403
+        self._paused_until = 0.0      # set after a 429: skip Dhan briefly
         os.makedirs(cache_dir, exist_ok=True)
 
+    @property
+    def auth_dead(self) -> bool:
+        return self._auth_dead
+
     # ------------------------------------------------------------------ http
+    def _guard_fail_fast(self) -> None:
+        """Raise instantly (no request, no lock wait, no sleep) when Dhan is
+        known-bad: dead token, or inside the cool-off window after a 429."""
+        if self._auth_dead:
+            raise DhanAuthError(
+                "dhan token rejected earlier this run - skipping Dhan")
+        if time.time() < self._paused_until:
+            raise DhanThrottledError(
+                f"dhan cooling off after 429 until "
+                f"{time.strftime('%H:%M:%S', time.localtime(self._paused_until))}"
+                f" - skipping Dhan")
+
     def _post(self, path: str, payload: dict) -> requests.Response:
         headers = {
             "access-token": self.token,
@@ -116,6 +151,7 @@ class DhanClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        self._guard_fail_fast()
         with self._lock:
             wait = self.min_interval - (time.time() - self._last_call)
             if wait > 0:
@@ -128,16 +164,28 @@ class DhanClient:
             try:
                 r = requests.post(BASE_URL + path, json=payload,
                                   headers=headers, timeout=self.timeout)
-                # 429 = "slow down" - DO NOT retry immediately (it makes
-                # throttling worse); adapt the throttle instead
+                # dead/expired token -> remember it: every later call fails
+                # in _guard_fail_fast() without touching the network
+                if r.status_code in (401, 403):
+                    self._auth_dead = True
+                    raise DhanAuthError(
+                        f"{r.status_code} - Dhan rejected the access token "
+                        f"({path}); rotate DHAN_ACCESS_TOKEN")
+                # 429 = "slow down" -> do NOT retry, do NOT wait: back off
+                # Dhan globally for a few seconds and let this symbol go to
+                # the yfinance fallback right now
                 if r.status_code == 429:
                     with self._lock:
-                        self.min_interval = min(2.5, self.min_interval * 1.5)
-                    raise requests.HTTPError(
-                        f"429 rate limited ({path}) - throttled "
-                        f"(interval now {self.min_interval:.2f}s)")
+                        self.min_interval = min(2.5, max(0.25,
+                                                         self.min_interval * 1.5))
+                        pause_s = max(5.0, 3.0 * self.min_interval)
+                        self._paused_until = time.time() + pause_s
+                    raise DhanThrottledError(
+                        f"429 rate limited ({path}) - Dhan paused "
+                        f"{pause_s:.0f}s, falling back now")
+                # 5xx: retry IMMEDIATELY (no back-off sleep - the fallback
+                # must not wait behind Dhan retries)
                 if r.status_code in (500, 502, 503, 504) and attempt < self.max_retries - 1:
-                    time.sleep(1.5 * (attempt + 1))
                     continue
                 r.raise_for_status()
                 # gentle recovery: slowly return toward the base interval
@@ -145,9 +193,16 @@ class DhanClient:
                     if self.min_interval > 0.5:
                         self.min_interval = max(0.5, self.min_interval * 0.95)
                 return r
+            except DhanAuthError:
+                raise
+            except requests.Timeout:
+                # a hanging connection already cost us `timeout` seconds -
+                # never pay it twice; raise so the caller falls back NOW
+                raise
             except requests.RequestException as e:
                 last_err = e
-                time.sleep(1.0 * (attempt + 1))
+                # immediate retry, zero sleep: fast connection-level errors
+                # cost milliseconds and must not delay the yfinance fallback
         raise last_err if last_err else RuntimeError("request failed")
 
     # ------------------------------------------------------------ instruments
@@ -302,6 +357,12 @@ class DhanClient:
                 # scanner's alerts need it (else "PATTERN SIGNAL — ?")
                 return self._slice(bars, from_date, to_date)
 
+        # fail fast when Dhan is known-bad (dead token / 429 cool-off) so the
+        # scanner drops this symbol to yfinance in ~0s instead of timing out.
+        # NOTE: this sits AFTER the cache read above - cached bars that are
+        # already fresh through `to_date` are served without any network.
+        self._guard_fail_fast()
+
         # SINGLE request - the version proven to work (yesterday + today's
         # 12:22 run found 916 signals with this). Do NOT chunk.
         payload = {
@@ -330,6 +391,7 @@ class DhanClient:
         Returns list of dicts {ts, open, high, low, close, volume}
         (oldest -> newest) or None if no data / error.
         """
+        self._guard_fail_fast()   # dead token / 429 cool-off -> instant fail
         security_id = self.resolve_symbol(symbol)
         if security_id is None:
             return None
