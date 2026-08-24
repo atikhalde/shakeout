@@ -335,16 +335,26 @@ Reference results (Yahoo data, 90 large/mid-caps, 2 years, score>=55):
   score >= 60 -> 5-day win 83% avg +2.6%   (default threshold = 60 now)
 ```
 
-The default `score_threshold` is now **60** (was 55) — the backtest shows
-score >= 60 gives ~83% 5-day win vs 71% overall. Alerts also show the
+The default `score_threshold` is now **70** (was 55 → 60) — the backtest shows
+score >= 70 gives ~25% big-move rate vs 18% at 60. Alerts also show the
 **big-move target** (entry + 8%, the same basis the backtest's `big_move`
-flag uses) and the **3–7 day trade horizon**.
+flag uses) and the **3–7 day trade horizon**. At 70 the pattern is RARE by
+design — expect multi-day stretches with zero alerts; the scan summary now
+reports near-misses (setups that matched but scored 55–69) so quiet days are
+explainable.
 
 Tips:
 - Start with `--limit 300` (~2 min) to see the speed, then `--limit 0`
   for the whole ~2,145-stock universe (~5-8 min in Actions).
 - `--source yfinance` works locally without a Dhan token
   (`pip install yfinance`) if you want a quick sanity check.
+- **Dhan → yfinance failover is INSTANT** (no retry back-off waits):
+  a rejected token (401/403) marks Dhan dead for the rest of the run, a
+  429 pauses Dhan for a few seconds while the current symbol falls back
+  immediately, and timeouts/5xx never sleep between attempts — so a
+  failing Dhan call hands the symbol to yfinance within ~a second. The
+  local bar cache (`data/cache/`) is still served first even when Dhan
+  is down.
 
 
 ## 🎯 Trade manager (implemented after live validation)

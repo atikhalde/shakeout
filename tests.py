@@ -340,6 +340,8 @@ def test_run_live_unpack() -> None:
     """Regression: run_live's scan_one must always return 3-tuples
     (the GitHub runner crashed with 'expected 3, got 2')."""
     print("== run_live end-to-end (mocked Dhan, exercises unpack) ==")
+    import os
+    import tempfile
     import types
     import unittest.mock as mock
     import scanner as scanner_mod
@@ -367,8 +369,13 @@ def test_run_live_unpack() -> None:
 
     import dhan_client as dhan_mod
     with mock.patch.object(dhan_mod, "DhanClient", FakeClient):
+        cfg = ScanConfig()
+        # isolate: never let a repo-level signals_tracker.csv (from an
+        # earlier run) suppress this test's signals via the cross-run
+        # cooldown - the test asserts fresh-scan behavior
+        cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "tracker.csv")
         rows = scanner_mod.run_live(
-            ScanConfig(), "tok", "cid", limit=0,
+            cfg, "tok", "cid", limit=0,
             watchlist="watchlist.txt", from_days=400,
             force_refresh=False, debug=False, intraday=False,
             notifier=None,
@@ -379,6 +386,288 @@ def test_run_live_unpack() -> None:
           rows and all(r.get("symbol") and r["symbol"] != "?"
                        for r in rows),
           f"symbols={[r.get('symbol') for r in rows] if rows else 'none'}")
+
+
+def test_cross_run_cooldown_and_summary() -> None:
+    """
+    Regression (2026-08-19/20): the SAME setup re-alerted on every scanner
+    run that still served the same last daily bar (5 identical '? ' alerts
+    on Aug 19 for the Aug-18 signal). The tracker-backed cross-run cooldown
+    must suppress a symbol re-alerted within cooldown_days, and the Telegram
+    summary must be able to carry scan stats / near-misses.
+    """
+    print("== cross-run alert cooldown + summary stats ==")
+    import os
+    import tempfile
+    import unittest.mock as mock
+    import scanner as scanner_mod
+    import dhan_client as dhan_mod
+    from tracker import log_signal, recently_alerted, last_alert_date
+    from telegram_notifier import TelegramNotifier
+
+    # ---- unit: recently_alerted semantics ----
+    f = os.path.join(tempfile.mkdtemp(), "tracker.csv")
+    log_signal({"symbol": "MYSTOCK", "signal_date": "2026-08-18",
+                "score": 74, "last_close": 1130.6, "stop_level": 999.63,
+                "target_level": 1221.05, "rr": 0.69, "vol_surge": 1.36}, f)
+    check("last_alert_date finds newest", last_alert_date("MYSTOCK", f) == "2026-08-18")
+    check("same-day repeat suppressed",
+          recently_alerted("MYSTOCK", "2026-08-18", 15, f) is True)
+    check("next-day repeat suppressed",
+          recently_alerted("MYSTOCK", "2026-08-19", 15, f) is True)
+    check("day-15 repeat suppressed",
+          recently_alerted("MYSTOCK", "2026-09-02", 15, f) is True)
+    check("day-16 repeat allowed",
+          recently_alerted("MYSTOCK", "2026-09-03", 15, f) is False)
+    check("other symbol unaffected",
+          recently_alerted("OTHER", "2026-08-19", 15, f) is False)
+
+    # ---- end-to-end: run_live twice on the same bars -> 2nd run silent ----
+    from demo_data import demo_universe
+    _dates, _bars, _exp = demo_universe()["SPORTKING"]
+    _bars = {k: list(v) for k, v in _bars.items()}
+    _bars["dates"] = list(_dates)
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def get_instruments(self):
+            return {"SPORTKING": "1", "BAJFINANCE": "2", "SPR_AUTO": "3"}
+        def liquid_universe(self):
+            return ["SPORTKING", "BAJFINANCE", "SPR_AUTO"]
+        def resolve_symbol(self, s): return "1"
+        def get_daily(self, sym, *a, **k):
+            b = {kk: list(vv) for kk, vv in _bars.items() if kk != "symbol"}
+            return b
+        def intraday_partial(self, *a, **k): return None
+
+    cfg = ScanConfig()
+    cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "signals_tracker.csv")
+    with mock.patch.object(dhan_mod, "DhanClient", FakeClient):
+        first = scanner_mod.run_live(cfg, "tok", "cid", limit=0,
+                                     watchlist="watchlist.txt", from_days=400,
+                                     force_refresh=False, debug=False,
+                                     intraday=False, notifier=None)
+        second = scanner_mod.run_live(cfg, "tok", "cid", limit=0,
+                                      watchlist="watchlist.txt", from_days=400,
+                                      force_refresh=False, debug=False,
+                                      intraday=False, notifier=None)
+    check("first run alerts the signals", len(first) == 3)
+    check("second run on same bars is silent (cooldown)",
+          len(second) == 0,
+          f"second run returned {len(second)} signals")
+
+    # ---- summary stats rendering ----
+    s = TelegramNotifier.format_summary(
+        0, "800 symbols",
+        "scanned 800 · prefilter-skipped 640 · errors 3 · near-misses "
+        "(score < 70): TATAPOWER 66, HAL 62")
+    check("summary carries stats line", "near-misses" in s and "⚙️" in s)
+
+
+def test_fail_fast_dhan_to_yfinance() -> None:
+    """
+    Regression (2026-08-24): a failing Dhan call used to sleep through
+    1+2+3s of retry back-off BEFORE the scanner fell back to yfinance -
+    ~6s wasted per symbol, ~80 min across an 800-symbol run with a dead
+    token. Requirement: Dhan failure -> yfinance on the NEXT second.
+    """
+    print("== fail-fast: Dhan error -> instant yfinance fallback ==")
+    import datetime as dt
+    import os
+    import tempfile
+    import time as _time
+    import unittest.mock as mock
+    import requests
+    import dhan_client as dhan_mod
+    from dhan_client import DhanAuthError, DhanClient
+
+    class FakeResp:
+        def __init__(self, status): self.status_code = status; self.text = "x"
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def client():
+        return DhanClient("bad-token", cache_dir=tempfile.mkdtemp(),
+                          min_interval=0.0, timeout=5.0)
+
+    # ---- 401: raise DhanAuthError instantly, remember it, never re-call ----
+    calls = {"n": 0}
+    def post_401(*a, **k):
+        calls["n"] += 1
+        return FakeResp(401)
+    c = client()
+    with mock.patch.object(dhan_mod.requests, "post", post_401):
+        t0 = _time.monotonic()
+        try:
+            c._post("/v2/charts/historical", {})
+            raised = None
+        except Exception as e:
+            raised = e
+        el = _time.monotonic() - t0
+    check("401 raises DhanAuthError", isinstance(raised, DhanAuthError))
+    check("401 fails fast (<1s, no back-off sleeps)", el < 1.0, f"{el:.2f}s")
+    check("401 marks token dead", c.auth_dead is True)
+    check("401 not retried", calls["n"] == 1, f"calls={calls['n']}")
+    t0 = _time.monotonic()
+    try:
+        c._post("/v2/charts/historical", {})
+    except DhanAuthError:
+        pass
+    check("later calls fail instantly (0 new HTTP)",
+          calls["n"] == 1 and _time.monotonic() - t0 < 0.5)
+
+    # ---- 429: raise immediately + short global pause, no waiting around ----
+    calls["n"] = 0
+    def post_429(*a, **k):
+        calls["n"] += 1
+        return FakeResp(429)
+    c = client()
+    with mock.patch.object(dhan_mod.requests, "post", post_429):
+        t0 = _time.monotonic()
+        try:
+            c._post("/v2/charts/historical", {})
+        except dhan_mod.DhanThrottledError:
+            pass
+        el = _time.monotonic() - t0
+        check("429 raises immediately (<1s)", el < 1.0, f"{el:.2f}s")
+        check("429 not retried", calls["n"] == 1, f"calls={calls['n']}")
+        # during the cool-off window: instant raise, zero new requests
+        t0 = _time.monotonic()
+        try:
+            c._post("/v2/charts/historical", {})
+        except dhan_mod.DhanThrottledError as e:
+            paused = "cooling off" in str(e)
+        check("429 pause skips Dhan instantly",
+              calls["n"] == 1 and _time.monotonic() - t0 < 0.5 and paused)
+
+    # ---- timeout: ONE attempt only (never pay the timeout twice) ----
+    calls["n"] = 0
+    def post_timeout(*a, **k):
+        calls["n"] += 1
+        raise requests.Timeout("simulated hang")
+    c = client()
+    with mock.patch.object(dhan_mod.requests, "post", post_timeout):
+        try:
+            c._post("/v2/charts/historical", {})
+        except requests.Timeout:
+            pass
+    check("timeout: single attempt, no retry", calls["n"] == 1,
+          f"calls={calls['n']}")
+
+    # ---- 5xx: retried but with ZERO back-off sleep, then raises fast ----
+    calls["n"] = 0
+    def post_503(*a, **k):
+        calls["n"] += 1
+        return FakeResp(503)
+    c = client()
+    with mock.patch.object(dhan_mod.requests, "post", post_503):
+        t0 = _time.monotonic()
+        try:
+            c._post("/v2/charts/historical", {})
+        except requests.HTTPError:
+            pass
+        el = _time.monotonic() - t0
+    check("5xx retries without sleeping then raises",
+          calls["n"] == c.max_retries and el < 1.0,
+          f"calls={calls['n']}, {el:.2f}s")
+
+    # ---- dead token + fresh local cache: cache still serves (no network) ----
+    tmp = tempfile.mkdtemp()
+    c = DhanClient("bad", cache_dir=tmp, min_interval=0.0)
+    with open(os.path.join(tmp, "RELIANCE.csv"), "w", newline="") as f:
+        f.write("date,open,high,low,close,volume\n")
+        for i in range(1, 6):
+            f.write(f"2026-08-0{i},100,105,99,102,1000\n")
+    with mock.patch.object(
+            dhan_mod.requests, "post",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("network!"))):
+        bars = c.get_daily("RELIANCE", dt.date(2026, 8, 1),
+                           dt.date(2026, 8, 5))
+        check("fresh cache served without any network call",
+              bars is not None and len(bars["close"]) == 5)
+        # stale cache + dead token -> instant raise so yfinance takes over
+        c._auth_dead = True
+        try:
+            c.get_daily("RELIANCE", dt.date(2026, 8, 1), dt.date(2026, 8, 7))
+            err = None
+        except DhanAuthError as e:
+            err = e
+        check("stale cache + dead token -> instant DhanAuthError",
+              isinstance(err, DhanAuthError))
+
+
+def test_run_live_all_scan_one_paths() -> None:
+    """
+    Regression (found in pre-merge review): scan_one returned 3-tuples on
+    its error and prefilter-skip paths while run_live unpacked 4 values -
+    the FIRST prefilter-skipped or data-failed symbol would crash the whole
+    live scan with ValueError (the same bug class PR #2 fixed for 2->3).
+    Exercise ALL THREE paths (error / prefilter-skip / signal) end-to-end.
+    """
+    print("== run_live: error + prefilter-skip + signal paths together ==")
+    import os
+    import tempfile
+    import unittest.mock as mock
+    import scanner as scanner_mod
+    import dhan_client as dhan_mod
+    from demo_data import demo_universe
+
+    _dates, _bars, _exp = demo_universe()["SPORTKING"]
+    _bars = {k: list(v) for k, v in _bars.items()}
+    _bars["dates"] = list(_dates)
+
+    n = 180
+    red_bars = {
+        "dates": [f"2026-{i//30+1:02d}-{i%28+1:02d}" for i in range(n)],
+        "open": [100.0 + i * 0.1 for i in range(n)],
+        "high": [103.0 + i * 0.1 for i in range(n)],
+        "low": [97.0 + i * 0.1 for i in range(n)],
+        "close": [98.0 + i * 0.1 for i in range(n)],  # close<open -> prefilter
+        "volume": [1e6] * n,
+    }
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def get_instruments(self):
+            return {"GOOD": "1", "REDS": "2", "NODATA": "3"}
+        def liquid_universe(self):
+            return ["GOOD", "REDS", "NODATA"]
+        def resolve_symbol(self, s): return "1"
+        def get_daily(self, sym, *a, **k):
+            if sym == "GOOD":
+                return {kk: list(vv) for kk, vv in _bars.items()}
+            if sym == "REDS":
+                return {k2: list(v2) for k2, v2 in red_bars.items()}
+            return None                     # NODATA: Dhan has nothing
+        def intraday_partial(self, *a, **k): return None
+
+    wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
+    with open(wl, "w") as f:
+        f.write("GOOD\nREDS\nNODATA\n")
+
+    cfg = ScanConfig()
+    cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "tracker.csv")
+
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with mock.patch.object(dhan_mod, "DhanClient", FakeClient), \
+         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None):
+        with contextlib.redirect_stdout(buf):
+            rows = scanner_mod.run_live(
+                cfg, "tok", "cid", limit=0, watchlist=wl, from_days=400,
+                force_refresh=False, debug=False, intraday=False,
+                notifier=None)
+    out = buf.getvalue()
+    check("all 3 paths survive one run (no unpack crash)", rows is not None)
+    check("signal path still works", len(rows) == 1
+          and rows[0]["symbol"] == "GOOD",
+          f"rows={[(r['symbol'], r['score']) for r in rows]}")
+    check("error path counted (NODATA)",
+          "1 errors" in out and "NODATA" in out)
+    check("prefilter path counted (REDS)",
+          "1 prefilter-skipped" in out, out.splitlines()[-3:])
 
 
 def test_backtest_finds_verified_stocks() -> None:
@@ -485,6 +774,9 @@ def main() -> int:
     test_backtest_finds_verified_stocks()
     test_tracker()
     test_run_live_unpack()
+    test_cross_run_cooldown_and_summary()
+    test_fail_fast_dhan_to_yfinance()
+    test_run_live_all_scan_one_paths()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1
