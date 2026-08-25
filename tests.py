@@ -368,6 +368,11 @@ def test_run_live_unpack() -> None:
         def intraday_partial(self, *a, **k): return None
 
     import dhan_client as dhan_mod
+    # pin a tiny watchlist - the repo's watchlist.txt is user-managed data
+    # (now ~120 large-caps) and must not drive test expectations
+    wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
+    with open(wl, "w") as f:
+        f.write("SPORTKING\nBAJFINANCE\nSPR_AUTO\n")
     with mock.patch.object(dhan_mod, "DhanClient", FakeClient):
         cfg = ScanConfig()
         # isolate: never let a repo-level signals_tracker.csv (from an
@@ -376,7 +381,7 @@ def test_run_live_unpack() -> None:
         cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "tracker.csv")
         rows = scanner_mod.run_live(
             cfg, "tok", "cid", limit=0,
-            watchlist="watchlist.txt", from_days=400,
+            watchlist=wl, from_days=400,
             force_refresh=False, debug=False, intraday=False,
             notifier=None,
         )
@@ -442,13 +447,17 @@ def test_cross_run_cooldown_and_summary() -> None:
 
     cfg = ScanConfig()
     cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "signals_tracker.csv")
+    # pin a tiny watchlist (repo watchlist.txt is user-managed, ~120 symbols)
+    wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
+    with open(wl, "w") as f:
+        f.write("SPORTKING\nBAJFINANCE\nSPR_AUTO\n")
     with mock.patch.object(dhan_mod, "DhanClient", FakeClient):
         first = scanner_mod.run_live(cfg, "tok", "cid", limit=0,
-                                     watchlist="watchlist.txt", from_days=400,
+                                     watchlist=wl, from_days=400,
                                      force_refresh=False, debug=False,
                                      intraday=False, notifier=None)
         second = scanner_mod.run_live(cfg, "tok", "cid", limit=0,
-                                      watchlist="watchlist.txt", from_days=400,
+                                      watchlist=wl, from_days=400,
                                       force_refresh=False, debug=False,
                                       intraday=False, notifier=None)
     check("first run alerts the signals", len(first) == 3)
@@ -670,6 +679,103 @@ def test_run_live_all_scan_one_paths() -> None:
           "1 prefilter-skipped" in out, out.splitlines()[-3:])
 
 
+def test_quiet_run_artifacts_and_summary() -> None:
+    """Regression (2026-08-25): a 0-signal live run used to write NO output
+    at all -> the Actions upload warned 'No files were found: logs/', the
+    run page showed nothing, and a healthy quiet day looked like a broken
+    one. Now: a .summary.txt sidecar is written on EVERY live run, the
+    stats are also appended to $GITHUB_STEP_SUMMARY, and a dead Dhan token
+    is surfaced in both the summary and the Telegram stats line.
+    """
+    print("== quiet-run artifacts (summary sidecar + step summary) ==")
+    import os
+    import tempfile
+    import unittest.mock as mock
+    import scanner as scanner_mod
+    import dhan_client as dhan_mod
+    from demo_data import demo_universe
+
+    _dates, _bars, _exp = demo_universe()["SPORTKING"]
+    _bars = {k: list(v) for k, v in _bars.items()}
+    _bars["dates"] = list(_dates)
+
+    class DeadClient:  # Dhan auth dead -> summary must say so, not hide it
+        auth_dead = True
+        def __init__(self, *a, **k): pass
+        def get_instruments(self): return {"GOOD": "1"}
+        def liquid_universe(self): return ["GOOD"]
+        def resolve_symbol(self, s): return "1"
+        def get_daily(self, *a, **k):
+            raise dhan_mod.DhanAuthError("401 dead token")
+        def intraday_partial(self, *a, **k): return None
+
+    wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
+    with open(wl, "w") as f:
+        f.write("GOOD\n")
+
+    # ---- run_live level: summary sink gets stats + the offline flag ----
+    cfg = ScanConfig()
+    cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "tracker.csv")
+    with mock.patch.object(dhan_mod, "DhanClient", DeadClient), \
+         mock.patch.object(scanner_mod, "_yf_daily",
+                           lambda *a, **k: {**_bars}):
+        summary: list = []
+        scanner_mod.run_live(cfg, "tok", "cid", limit=0, watchlist=wl,
+                             from_days=400, force_refresh=False, debug=False,
+                             intraday=False, notifier=None,
+                             summary_sink=summary)
+    check("summary sink carries scan stats",
+          any(l.startswith("scan: ") for l in summary), summary)
+    check("summary surfaces Dhan-offline state",
+          any("Dhan OFFLINE" in l for l in summary), summary)
+
+    # ---- main() level quiet run: summary file written, no signals CSV ----
+    tmp = tempfile.mkdtemp()
+    out_csv = os.path.join(tmp, "signals.csv")
+    gh_summary = os.path.join(tmp, "gh_step_summary.txt")
+    env = {"DHAN_ACCESS_TOKEN": "tok", "GITHUB_STEP_SUMMARY": gh_summary,
+           "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""}
+    argv = ["--mode", "live", "--watchlist", wl, "--out", out_csv]
+    with mock.patch.object(dhan_mod, "DhanClient", DeadClient), \
+         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None), \
+         mock.patch.dict(os.environ, env):
+        rc = scanner_mod.main(argv)
+    check("quiet main() exits 0", rc == 0)
+    check("quiet run writes the .summary.txt sidecar (no upload warning)",
+          os.path.exists(out_csv + ".summary.txt"))
+    check("quiet run writes NO signals CSV",
+          not os.path.exists(out_csv),
+          f"unexpected file: {out_csv}")
+    side = open(out_csv + ".summary.txt").read()
+    check("summary sidecar carries scan stats + result",
+          "scan: " in side and "result: 0 signal(s)" in side
+          and "Dhan OFFLINE" in side, side)
+    check("stats also appended to $GITHUB_STEP_SUMMARY",
+          os.path.exists(gh_summary)
+          and "scan: " in open(gh_summary).read())
+
+    # ---- main() with a signal: the CSV appears, header = TABLE_FIELDS ----
+    out_csv2 = os.path.join(tmp, "signals2.csv")
+    with mock.patch.object(dhan_mod, "DhanClient", DeadClient), \
+         mock.patch.object(scanner_mod, "_yf_daily",
+                           lambda *a, **k: {**_bars}), \
+         mock.patch.dict(os.environ, env):
+        cfg2 = ScanConfig()
+        # fresh tracker so cross-run cooldown does not suppress the signal;
+        # main() builds its own cfg, so point the DEFAULT file away
+        tracker_backup = cfg2.tracker_file
+        cfg2.tracker_file = os.path.join(tmp, "tracked", "tracker.csv")
+        with mock.patch.object(scanner_mod, "ScanConfig", lambda: cfg2):
+            rc = scanner_mod.main(["--mode", "live", "--watchlist", wl,
+                                   "--out", out_csv2])
+        cfg2.tracker_file = tracker_backup
+    import csv as _csv
+    with open(out_csv2) as f:
+        first_line = f.readline().strip()
+    check("signal run writes the CSV with the standard header",
+          first_line == ",".join(scanner_mod.TABLE_FIELDS), first_line)
+
+
 def test_backtest_finds_verified_stocks() -> None:
     """Regression: the backtest must find the 3 verified stocks on their
     exact signal dates (demo data), with ISO dates and recent flag."""
@@ -777,6 +883,7 @@ def main() -> int:
     test_cross_run_cooldown_and_summary()
     test_fail_fast_dhan_to_yfinance()
     test_run_live_all_scan_one_paths()
+    test_quiet_run_artifacts_and_summary()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1
