@@ -43,6 +43,12 @@ from telegram_notifier import TelegramNotifier
 from tracker import log_signal, recently_alerted, update_open
 
 
+TABLE_FIELDS = ["rank", "symbol", "score", "signal_date", "last_close",
+                "bos_date", "bos_style", "break_level", "peak", "flush_low",
+                "flush_date", "flush_drop%", "ssl", "min_close_after_ssl",
+                "reversal_bounce%", "retrace%"]
+
+
 def _table_rows(signals: list[dict]) -> list[dict]:
     out = []
     for i, s in enumerate(signals, 1):
@@ -95,13 +101,45 @@ def _print_table(rows: list[dict]) -> None:
 
 
 def _write_csv(rows: list[dict], path: str) -> None:
-    if not rows:
-        return
+    # ALWAYS write the file, even with 0 signals: a quiet day used to
+    # produce no output at all, which made the Actions upload step warn
+    # "No files were found with the provided path: logs/" and left no
+    # on-page evidence that the scan actually ran. A header-only CSV +
+    # the .summary.txt sidecar (see main) make every run self-explanatory.
     with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w = csv.DictWriter(f, fieldnames=TABLE_FIELDS)
         w.writeheader()
         w.writerows(rows)
-    print(f"wrote {len(rows)} rows -> {path}")
+    if rows:
+        print(f"wrote {len(rows)} rows -> {path}")
+    else:
+        print(f"no signals - wrote header-only CSV -> {path}")
+
+
+def _write_summary(path: str, lines: list[str]) -> None:
+    """Write the human-readable scan summary next to the signals CSV
+    (<out>.summary.txt). Written on EVERY live run - including quiet ones -
+    so the Actions artifact upload never warns 'No files were found:
+    logs/' and a quiet day leaves verifiable evidence the scan ran."""
+    try:
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def _append_step_summary(lines: list[str]) -> None:
+    """Append the same lines to GitHub's $GITHUB_STEP_SUMMARY when running
+    inside Actions -> the stats show up on the run page even without
+    opening the logs or waiting for the Telegram message."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a") as f:
+            f.write("\n".join(lines) + "\n\n")
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -243,9 +281,16 @@ def run_demo(cfg: ScanConfig, backtest: bool, backtest_days: int,
 def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
              watchlist: str | None, from_days: int, force_refresh: bool,
              debug: bool, intraday: bool = False,
-             notifier: TelegramNotifier | None = None) -> list[dict]:
+             notifier: TelegramNotifier | None = None,
+             summary_sink: list[str] | None = None) -> list[dict]:
     from dhan_client import DhanClient, DhanAuthError
     from universes import get_universe
+
+    def _summary(line: str) -> None:
+        # every line the user should see on the Actions run page (and as
+        # proof a quiet day was a HEALTHY quiet day, not a silent failure)
+        if summary_sink is not None:
+            summary_sink.append(line)
 
     client = DhanClient(token, client_id,
                         min_interval=cfg.live_request_interval,
@@ -437,6 +482,22 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     import time as _t
     print(f"scanned {total} symbols, {len(signals)} signals, {errors} errors, "
           f"{pref_skipped} prefilter-skipped in {_t.time() - t0:.0f}s")
+    _summary(f"scan: {total} scanned · {len(signals)} signals · "
+             f"{errors} errors · {pref_skipped} prefilter-skipped "
+             f"· score>= {cfg.score_threshold:.0f}")
+    # ---- data-source health: Dhan dead -> yfinance fallback is FINE for
+    #      daily bars but must be VISIBLE (a silently-stale token is how the
+    #      2026-08-24/25 quiet-days confusion started) ----
+    dhan_offline = bool(getattr(client, "auth_dead", False) or _auth_warned[0])
+    if dhan_offline:
+        msg = ("WARNING: Dhan was OFFLINE this run (rejected/expired token) - "
+               "all data came from the yfinance fallback. Rotate "
+               "DHAN_ACCESS_TOKEN to restore primary data.")
+        print(msg, file=sys.stderr)
+        _summary("data: Dhan OFFLINE (expired token?) - yfinance fallback "
+                 "used; rotate DHAN_ACCESS_TOKEN")
+    else:
+        _summary("data: Dhan OK")
     if errors and err_by_type:
         print("error breakdown:")
         for k, v in sorted(err_by_type.items(), key=lambda kv: -kv[1])[:8]:
@@ -495,6 +556,10 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         near_misses.sort(key=lambda x: -x[1])
         print(f"near-misses (pattern OK, score < {cfg.score_threshold:.0f}): "
               + ", ".join(f"{s}:{sc:.0f}" for s, sc, _ in near_misses[:10]))
+        _summary("near-misses: " + ", ".join(f"{s} {sc:.0f}"
+                                             for s, sc, _ in near_misses[:10]))
+    if cooldown_skipped:
+        _summary(f"cooldown: {cooldown_skipped} re-alert(s) suppressed")
 
     rows = _table_rows(sorted(signals, key=lambda s: -s["score"]))
     _print_table(rows)
@@ -514,6 +579,9 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         scope = f"{len(symbols)} symbols"
         stats = (f"scanned {len(symbols)} · prefilter-skipped {pref_skipped} "
                  f"· errors {errors}")
+        if dhan_offline:
+            stats = ("⚠️ DHAN OFFLINE (yfinance fallback - rotate token) · "
+                     + stats)
         if cooldown_skipped:
             stats += f" · {cooldown_skipped} re-alert(s) suppressed by cooldown"
         if near_misses:
@@ -593,9 +661,20 @@ def main(argv=None) -> int:
                   "or pass --token (create one at Dhan -> Settings -> API).",
                   file=sys.stderr)
             return 2
+        summary: list[str] = []
         rows = run_live(cfg, token, client_id, args.limit, args.watchlist,
                         args.from_days, args.refresh, args.debug,
-                        args.intraday, notifier)
+                        args.intraday, notifier, summary_sink=summary)
+        stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
+        summary = [f"shakeout scan - {stamp} "
+                   f"({'intraday' if args.intraday else 'eod'})"] + summary \
+                  + [f"result: {len(rows)} signal(s)"]
+        _append_step_summary(summary)
+        if args.out:
+            _write_summary(args.out + ".summary.txt", summary)
+            if rows:
+                _write_csv(rows, args.out)
+        return 0
 
     if args.out and rows:
         _write_csv(rows, args.out)

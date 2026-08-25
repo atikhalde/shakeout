@@ -213,7 +213,10 @@ a note that the candle is still forming and to confirm by close. The regular
 ### Option A — GitHub Actions (cloud, no PC needed)
 
 Push `intraday.yml` (included in the zip) and edit **`watchlist.txt`** with
-your symbols (one per line). The workflow:
+your symbols (one per line). The shipped default covers the 3 reference
+setups + the **top 120 NSE stocks by market cap** (the same names the daily
+scan prioritizes) — replace it with your own holdings/candidates any time.
+The workflow:
 
 - runs **09:15 IST kickoff + every 15 min 09:30–15:15 IST** Mon–Fri
 - scans your **watchlist** (fast, ~1–3 min per run)
@@ -223,6 +226,15 @@ your symbols (one per line). The workflow:
 ⚠️ **Free-tier minutes warning:** a ~100-symbol watchlist × 26 runs/day ≈
 600–1700 min/month — keep `watchlist.txt` ≤ ~150 symbols. Do **not** run
 full-universe intraday scans in Actions (would exceed the 2000 free minutes).
+
+**Quiet days are now explainable:** every live run appends its scan stats
+to the Actions run page (`scanned … · errors … · prefilter-skipped … ·
+near-misses …`) and writes a `<csv>.summary.txt` sidecar into `logs/`, so
+a quiet day visibly shows a healthy scan instead of a blank page. If the
+Dhan token is expired, the summary and the Telegram message say
+**"Dhan OFFLINE - yfinance fallback / rotate token"** instead of failing
+silently. The intraday daily-bar cache is persisted between runs via
+`actions/cache`.
 
 ### Option B — Local machine (unlimited, zero GitHub minutes)
 
