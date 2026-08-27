@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Undertaking Letter – Download</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #1a237e 0%, #283593 60%, #3949ab 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      background: #fff;
+      border-radius: 18px;
+      padding: 44px 40px 38px;
+      max-width: 500px;
+      width: 94%;
+      box-shadow: 0 12px 48px rgba(0,0,0,0.25);
+      text-align: center;
+    }
+    .icon { font-size: 52px; margin-bottom: 14px; }
+    h1 { font-size: 22px; color: #1a237e; margin-bottom: 6px; }
+    p.sub { font-size: 13.5px; color: #666; margin-bottom: 20px; }
+    .info-box {
+      background: #f3f4fb;
+      border-radius: 10px;
+      padding: 16px 18px;
+      text-align: left;
+      margin-bottom: 26px;
+      font-size: 13px;
+      color: #333;
+      line-height: 1.9;
+    }
+    .info-box b { color: #1a237e; }
+    .badge {
+      display: inline-block;
+      background: #e8f5e9;
+      color: #2e7d32;
+      border-radius: 20px;
+      font-size: 12px;
+      padding: 4px 14px;
+      margin-bottom: 20px;
+      font-weight: 600;
+    }
+    .btn {
+      display: inline-block;
+      background: linear-gradient(90deg, #1a237e, #3949ab);
+      color: #fff;
+      text-decoration: none;
+      padding: 14px 36px;
+      border-radius: 50px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      letter-spacing: 0.5px;
+      box-shadow: 0 4px 18px rgba(26,35,126,0.3);
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(26,35,126,0.4); }
+    .note { margin-top: 18px; font-size: 12px; color: #999; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">📄</div>
+    <h1>Undertaking Letter Ready</h1>
+    <p class="sub">Bank Account Opening – Address Declaration</p>
+    <span class="badge">✔ PDF Generated Successfully</span>
+    <div class="info-box">
+      <b>Applicant:</b> Atik Hasham Halde<br/>
+      <b>Mother:</b> Mrs. Seema Hasham Halde<br/>
+      <b>Branch:</b> Revdanda Branch<br/>
+      <b>Address:</b> 3022/10, At/Post-Revdanda, Theronda Fata,<br/>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Tal-Alibag, Dist-Raigad<br/>
+      <b>Date:</b> 27th August, 2026
+    </div>
+    <button class="btn" onclick="downloadPDF()">⬇ Download PDF</button>
+    <p class="note">File: Undertaking_Letter_Atik_Halde.pdf &nbsp;|&nbsp; ~5 KB</p>
+  </div>
+
+  <script>
+    const b64 = "JVBERi0xLjQKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSIC9GMiAzIDAgUiAvRjMgNCAwIFIgL0Y0IDYgMCBSIC9GNSA3IDAgUgo+PgplbmRvYmoKMiAwIG9iago8PAovQmFzZUZvbnQgL0hlbHZldGljYSAvRW5jb2RpbmcgL1dpbkFuc2lFbmNvZGluZyAvTmFtZSAvRjEgL1N1YnR5cGUgL1R5cGUxIC9UeXBlIC9Gb250Cj4+CmVuZG9iagozIDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhLUJvbGQgL0VuY29kaW5nIC9XaW5BbnNpRW5jb2RpbmcgL05hbWUgL0YyIC9TdWJ0eXBlIC9UeXBlMSAvVHlwZSAvRm9udAo+PgplbmRvYmoKNCAwIG9iago8PAovQmFzZUZvbnQgL0hlbHZldGljYS1PYmxpcXVlIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMyAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjUgMCBvYmoKPDwKL0NvbnRlbnRzIDEyIDAgUiAvTWVkaWFCb3ggWyAwIDAgNTk1LjI3NTYgODQxLjg4OTggXSAvUGFyZW50IDExIDAgUiAvUmVzb3VyY2VzIDw8Ci9Gb250IDEgMCBSIC9Qcm9jU2V0IFsgL1BERiAvVGV4dCAvSW1hZ2VCIC9JbWFnZUMgL0ltYWdlSSBdCj4+IC9Sb3RhdGUgMCAvVHJhbnMgPDwKCj4+IAogIC9UeXBlIC9QYWdlCj4+CmVuZG9iago2IDAgb2JqCjw8Ci9CYXNlRm9udCAvWmFwZkRpbmdiYXRzIC9OYW1lIC9GNCAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjcgMCBvYmoKPDwKL0Jhc2VGb250IC9IZWx2ZXRpY2EtQm9sZE9ibGlxdWUgL0VuY29kaW5nIC9XaW5BbnNpRW5jb2RpbmcgL05hbWUgL0Y1IC9TdWJ0eXBlIC9UeXBlMSAvVHlwZSAvRm9udAo+PgplbmRvYmoKOCAwIG9iago8PAovQ29udGVudHMgMTMgMCBSIC9NZWRpYUJveCBbIDAgMCA1OTUuMjc1NiA4NDEuODg5OCBdIC9QYXJlbnQgMTEgMCBSIC9SZXNvdXJjZXMgPDwKL0ZvbnQgMSAwIFIgL1Byb2NTZXQgWyAvUERGIC9UZXh0IC9JbWFnZUIgL0ltYWdlQyAvSW1hZ2VJIF0KPj4gL1JvdGF0ZSAwIC9UcmFucyA8PAoKPj4gCiAgL1R5cGUgL1BhZ2UKPj4KZW5kb2JqCjkgMCBvYmoKPDwKL1BhZ2VNb2RlIC9Vc2VOb25lIC9QYWdlcyAxMSAwIFIgL1R5cGUgL0NhdGFsb2cKPj4KZW5kb2JqCjEwIDAgb2JqCjw8Ci9BdXRob3IgKFwoYW5vbnltb3VzXCkpIC9DcmVhdGlvbkRhdGUgKEQ6MjAyNjA4MjcwNjUwNDYrMDAnMDAnKSAvQ3JlYXRvciAoXCh1bnNwZWNpZmllZFwpKSAvS2V5d29yZHMgKCkgL01vZERhdGUgKEQ6MjAyNjA4MjcwNjUwNDYrMDAnMDAnKSAvUHJvZHVjZXIgKFJlcG9ydExhYiBQREYgTGlicmFyeSAtIFwob3BlbnNvdXJjZVwpKSAKICAvU3ViamVjdCAoXCh1bnNwZWNpZmllZFwpKSAvVGl0bGUgKFwoYW5vbnltb3VzXCkpIC9UcmFwcGVkIC9GYWxzZQo+PgplbmRvYmoKMTEgMCBvYmoKPDwKL0NvdW50IDIgL0tpZHMgWyA1IDAgUiA4IDAgUiBdIC9UeXBlIC9QYWdlcwo+PgplbmRvYmoKMTIgMCBvYmoKPDwKL0ZpbHRlciBbIC9BU0NJSTg1RGVjb2RlIC9GbGF0ZURlY29kZSBdIC9MZW5ndGggMTcxNQo+PgpzdHJlYW0KR2F0bTxiQkRWdSZEY1kmQXVZTEYkaXRxakFTMys+V0VVYGUqRzNqTiJba1ppQE0zWVRZYEFecyItQWJILV5jPEVBUW0iWDFOVmEpKlFTQGdIa1E8PGFUNjlnR111cjY6bChIJ1IpOiVxS1kpTCJEKmhGTDBRPGEvKzpMVTdNcC1mNklMX10tZlYkQFQnOE8pQlBDUSQ1T1NWLiNDc0U8Q2k5QS1JZmM+KkBOJlgjbTRGRUAva0syV1Y0TEk9Xl4kWC1fPkhCLmcxPi00TjViKTxnJ00pVWVUW15uVUJdT0NaJCNyKydASl0qN21HMV1nclB1Z1ImK0ZmW2EqMT1vNWw7QVY/Zj5iVycoXDonKjo7cEwrIys5Y11ILjhJUyk9aWFmPj84RihWITVdRy88IyMhY0dNb0w/Zyw0W0FyMDIoU1JYLl1uTnQvSWptZTskJElJOWldayU/XzQ6MDxsbTZEWkBCKiVSW01sPFpaYTlvaGlXQFM1P0FcRDdXPFNHckkwcWc0ZW80b3VsRVppWkZfVDJLSVFsNCdINC9mQDVuTl01bTorXVlmbCc0RiNBWWFbI2gpbyU3YDwpb25MaG5GTW1cKSlKdWBEaysxXkFdOzJmS2RmYWtVamEtLGQmY2MqWS9JKEFrU0hwKj48UGNMJVgzS0VVbDgrJG9fXTw6I2hWOUEvKG8vZCRXXEJsUlNIWDwsTDRNLzJNakZYUklFJT9ub1FSZVhnLDZBNVdcRTQkJj9RIiNtKElAWmFoLzI7JG9EYk06a05Wb1Q/QDNKWm9jQ2lHPCJwJ3M3V0V1KldtNmVWQUxeWSpHbTtsNz4pOUprcEZpTW4iZWBMbEB0IkloRCFtbVkpcXNQOScyXVxFMzN0TVtbWEUyL0MhWFsqPjMxI3MjPiQvNGlBWSlHSCZlNEIoISM7aksyTzVIYjw8MEwrTGY5dU1lZWElPE9SVFwsVC82PCtTRENGNW8qOyE3Pkk9SSFoOmxjUUtcajFxMGovVCguT1gpYTFTYkJHW1o0N1pBQT8ubSI5QE9SIyxsTlEwa15BJyFIUWEldEZYKkZcczhrMF4kPDdhIlJnZDBONm1dSklubzEkYj05KGBAOTskKDhWLCpLdWonNHAnQmgmSkNHX1NHKElXXDdUNVgjIS1IXllkbypgN0tVNCRLNnQ9MHMkWWs1aDhRMj8iOzwxdVVwITIna3JocydURm4pMiFANT84KicqKmZBa21jTUNgXlx0T2c/UTZMOy0nJ0k4Rj82WjxGTlJESUY+cCtCNGwpMltlY2hoZFclLSVwYldeS000Y0M9Vk9DYzZDVGloazlCZU90YzxzMWpHP1tiZVc6M1pfU1xPRSQvVEYsImRQQG5gMEctTzFAajxKYk9UR0VZJktSJTYvKFxiY2xGSG1qLnNiXTAxIXNfYk1dP2EkM3FFTzZCZlwmNllEMCpEUzMqKl1EN1wpdGlbUW1AZWRENWFDUjBUWlMoYUUrcjU5Tk4jaTFvbmREIiVAY2FtZnVdQzExVjYqRygoMi0rVXVARzNtYCFCVWJUITo4a2ZVc2hPMTQqO0Y5NmEzbyVZWmwqIy5qSDVSKy1XcCcwXXREKiJRJiIlKWs3dWIqZFxAT2pVQjJKNjw5MzssL2xMXz4oIUNGJ28rZyFPLWlRa3JYNWojZDBybjZDKCFgRic6bjxvT3BPKGQubnFUSlBnbnRHYGJdOzhaSGZjU3FETTM6RVptNUFEL0soVU9iZWBSQiVtcW9NSVF1TmUvcjUyNURUdCwyW2ZtPFEyYi00QzUvcXNXQShtXFhdQDJJVHBBZHJsa1FMLTtvbSxCLy5IJC1ZVCgsLU89K2hIPGwudSJnRVlwQlYsQ0ckYklYXjMwc0hjYElNNFZhcUprOkVNUDxDNiQtJltZWmBKbCdkTC00SV5MRVdrZFNOOyFRZiguV0s4JWtmYylyOjVSQV9VMldtVTEtKDw9IXEpXk1DRG5oK20lW1gucVNvSGs3OVdZczRtT1wpZXRLOzpGWzknPm1uS2ZFP2BUSEFpPjNZQEQ2aGNhWUFWR3JGaEJqOG4pUV5XKkBLXkNZPzBWYldyIVtuYVJcTywkIU4zOTNONCU2biYjOkdfPDFrcjE+cidFNjo1aGEsPUIxQDxTIWlncyMiR1RiYVU9OS1IKGJ1QTErKFUtMnBeI2pKSE0xIWlHUEojckA8XWVZWC1RbjJuKjo/LkQvY2xvLTtySGxDNTgvc0hOcUBsP3I+al4zXmBycHJyRm9NZyFdfj5lbmRzdHJlYW0KZW5kb2JqCjEzIDAgb2JqCjw8Ci9GaWx0ZXIgWyAvQVNDSUk4NURlY29kZSAvRmxhdGVEZWNvZGUgXSAvTGVuZ3RoIDExMTYKPj4Kc3RyZWFtCkdiIi9lPkI/UHQnWl0sMC5GKS1obFZXYl5bODUnKGcycmRTRDhMMWcxUltMSzdMIXU5JkhuVEZcKmpwSyhoXUQ4RzEoKEhsNU5oPHMpU2s6IzZicSRbL1hFdCEzWyJwSTdKaUQ4Ni51PWleKixDXU0ydXMxSE1URyF0a2I8cCRkVkkpQCYhJzJ1QGFkIV5AX0JmXWNXPHJdREZUYEJhaWFucldaMiYyM2AqTlNzQko9aywkZWktQ1JeKnA8PHJKMUQ+azBALk9tcidSYmEyVChwRyhhYXM0YCIzZV9nNSFhY0pCbVZwQ0NJOnRDQGJHLCdSK05gU0NNYlVRRC8sdDpaYSRkciFDS1MyQSpSSDZwPlU5YlgyWUAzY1cxLFZxN2VtPjsjSFRla2ZyOztMaz9sRy5JaD44bkY5JF0xLjY2WispNyksOHVmZEtMXkpKT28iK3NmNyElYXIvOk0+bz1aUTVwMXRGJ0NYbShtOFhOYklHVVFJOFcmbC5FUFYyU3AnaDo+QmInWSI4KkZmbFxeZDl0ZkxVdU5wNjBFKTY8LG51dVVQY2taaj5KU1NBNithQkZhOW9VLzA7MVRNIl4nKU4kOWZoRiNgS2tjRXFZIy9kaS9sZi0nXlomQmorNzIyR01bMDwobUowbyopJS9PVkxQOTsrLCc6MVM7PkhaWDJMbjBAcFdiT1FuUzpVVmcoVl4iQy9BUjRMWFFkJUduP0wsYlRXZUZDSDlzcDZDay50ckNvdSE/L2M1Z0RCYT4+LTViQy5UXkVYT18uKDhuUm8xY1RJImtLcXRRbUs7WEgwYStZVC9CLTRicUdiSiYiMylIIkdIZlRJOGk3cCVcUy5cTCIvRHBxXz9CUWtPRis5SmJec1VUK0M9OC9IZj9tMVcpUWI3Z2dbSUI7U3EuWjg1bCQ1MylJIlQ9IydyYWNzTGIjOSZVYUZLcjtIJ1pHRi0ra0JqJEVhOyk6ZlRlZ2s8YTVZZzc8PjM/TUREL2krNi89RStgYlkyUidhdVddb2JrXGdXQjY/cFtCLl8+bm9QVltHWCReSy4uSjxFKlhGJjVeRE4yKVc+QzY5UT86SEhkVDVKNy9VSW1WMDRjPG46LDlBW1Q/WVVRXiZEQD1BXXUhN0stNyZIcWowVVpZIzo8UTkpalwuYkpUTEwtX0JjZWcnYj5Hby9GJThAL1cpJk8iOlZjSyJESFgsOWVPJSxIa19tPjtNKydEIkJyO3M4KSM6TGNUdElYayshPlg5TiMjU15AbV9yOlIjWz8+bTlpXEMsckhHM19LJ1hfYmY2XGdwWlw4Mis9VGxfWypfb0xvaWZNIyxFakcyKTwqJUFsJm1XI0xecGY4XypvXzg7IWIoU1pLNFUuT1A7WXVRS21tdCdQYi5aLTY2JkI3ZyZGJFBKLWRhaidCMnFLRSIkb0lPUDtbbzBjTmBxVl4tW3U0Py9HKD1DQiRZZVNKXz1CRXJFcmV+PmVuZHN0cmVhbQplbmRvYmoKeHJlZgowIDE0CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA2MSAwMDAwMCBuIAowMDAwMDAwMTMyIDAwMDAwIG4gCjAwMDAwMDAyMzkgMDAwMDAgbiAKMDAwMDAwMDM1MSAwMDAwMCBuIAowMDAwMDAwNDY2IDAwMDAwIG4gCjAwMDAwMDA2NzEgMDAwMDAgbiAKMDAwMDAwMDc1NCAwMDAwMCBuIAowMDAwMDAwODczIDAwMDAwIG4gCjAwMDAwMDEwNzggMDAwMDAgbiAKMDAwMDAwMTE0NyAwMDAwMCBuIAowMDAwMDAxNDI4IDAwMDAwIG4gCjAwMDAwMDE0OTQgMDAwMDAgbiAKMDAwMDAwMzMwMSAwMDAwMCBuIAp0cmFpbGVyCjw8Ci9JRCAKWzw2NmJmNDgyMjgxN2M4YzMwNzFmZWVhYjUzNDI0MWUyNj48NjZiZjQ4MjI4MTdjOGMzMDcxZmVlYWI1MzQyNDFlMjY+XQolIFJlcG9ydExhYiBnZW5lcmF0ZWQgUERGIGRvY3VtZW50IC0tIGRpZ2VzdCAob3BlbnNvdXJjZSkKCi9JbmZvIDEwIDAgUgovUm9vdCA5IDAgUgovU2l6ZSAxNAo+PgpzdGFydHhyZWYKNDUwOQolJUVPRgo=";
+    function downloadPDF() {
+      const byteChars = atob(b64);
+      const byteNums = new Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) {
+        byteNums[i] = byteChars.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNums);
+      const blob = new Blob([byteArray], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'Undertaking_Letter_Atik_Halde.pdf';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  </script>
+</body>
+</html>
