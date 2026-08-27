@@ -21,8 +21,8 @@ The Branch Manager,
 
 2. That my current residential address is:
 
-   **[Full Address],**
-   **[City, State – PIN Code]**
+   **3022/10, At/Post-Revdanda, Theronda Fata,**
+   **Tal-Alibag, Dist-Raigad – 402401**
 
    which is the residence of my mother, **Mrs. Seema Hasham Halde**.
 
@@ -50,9 +50,11 @@ The Branch Manager,
 
 **Name:** Atik Hasham Halde
 
+**Address:** 3022/10, At/Post-Revdanda, Theronda Fata, Tal-Alibag, Dist-Raigad – 402401
+
 **Date:** 27th August, 2026
 
-**Place:** ___________________________
+**Place:** Revdanda, Alibag, Raigad
 
 **Contact No.:** +91 89285 27062
 
@@ -71,6 +73,8 @@ I, **Mrs. Seema Hasham Halde**, hereby confirm that my son, **Mr. Atik Hasham Ha
 **Name:** Mrs. Seema Hasham Halde
 
 **Relationship:** Mother
+
+**Address:** 3022/10, At/Post-Revdanda, Theronda Fata, Tal-Alibag, Dist-Raigad – 402401
 
 **Date:** 27th August, 2026
 
