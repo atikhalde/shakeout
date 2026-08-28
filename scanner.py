@@ -48,6 +48,13 @@ TABLE_FIELDS = ["rank", "symbol", "score", "signal_date", "last_close",
                 "flush_date", "flush_drop%", "ssl", "min_close_after_ssl",
                 "reversal_bounce%", "retrace%"]
 
+# Filled by run_live after every scan; main() reads it to decide the exit
+# code (a data outage must turn the CI run RED, not green-and-silent).
+LAST_RUN_STATS: dict = {}
+
+# exit code when a live run was a data outage (distinct from 1=crash, 2=usage)
+EXIT_DATA_OUTAGE = 3
+
 
 def _table_rows(signals: list[dict]) -> list[dict]:
     out = []
@@ -146,16 +153,31 @@ def _append_step_summary(lines: list[str]) -> None:
 # intraday (live market) helpers
 # --------------------------------------------------------------------------
 
+_YF_MISSING = False   # set once yfinance turns out to be uninstalled/DOA
+
+
 def _yf_daily(sym: str, from_date, to_date):
     """Instant yfinance fallback for a symbol (Dhan -> Yahoo, no waiting)."""
+    global _YF_MISSING
     try:
         import yfinance as yf
+    except ImportError:
+        _YF_MISSING = True      # permanent for this process: never retry
+        return None
+    try:
         yf_sym = {"SPR_AUTO": "SHRIPISTON"}.get(sym, sym)
+        # NOTE: yfinance's `end` is EXCLUSIVE. Passing to_date directly
+        # silently drops the last bar, so a fallback-only run scans the
+        # market "as of yesterday" - the 16:30 IST EOD run used to work
+        # off stale data whenever Dhan's 24h token had expired.
+        end = to_date + dt.timedelta(days=1)
         df = yf.Ticker(f"{yf_sym}.NS").history(
-            start=from_date, end=to_date, auto_adjust=True)
+            start=from_date, end=end, auto_adjust=True)
         if df is None or df.empty:
             return None
         df = df.dropna(subset=["Open", "High", "Low", "Close"])
+        if df.empty:
+            return None
         return {
             "symbol": sym,
             "open": df["Open"].to_numpy(float),
@@ -171,8 +193,13 @@ def _yf_daily(sym: str, from_date, to_date):
 
 def _yf_intraday_partial(sym: str, date):
     """yfinance fallback for today's partial candle (15m bars -> 1 daily bar)."""
+    global _YF_MISSING
     try:
         import yfinance as yf
+    except ImportError:
+        _YF_MISSING = True
+        return None
+    try:
         yf_sym = {"SPR_AUTO": "SHRIPISTON"}.get(sym, sym)
         df = yf.Ticker(f"{yf_sym}.NS").history(
             period="1d", interval="15m", auto_adjust=True)
@@ -188,6 +215,51 @@ def _yf_intraday_partial(sym: str, date):
     except Exception:  # noqa: BLE001
         return None
 
+
+class _YfGate:
+    """
+    Process-wide pacer for EVERY yfinance fallback call (all workers share
+    one lock).
+
+    Why this exists (the 2026-08-24 silent outage): when Dhan's 24h token
+    is dead, every symbol falls back to Yahoo. Without pacing, ~800 symbols
+    hit Yahoo in a free-running 3-worker burst; Yahoo 429-rate-limits the
+    runner IP almost immediately, every fallback call then fails, and the
+    scan "succeeds" in ~1 minute with ZERO data - 4 straight days of green
+    runs with no possible alerts. A process-wide rate limit + ONE quick
+    retry is what keeps the fallback alive; without it the fallback
+    DDoSes itself exactly when Dhan is down.
+    """
+
+    def __init__(self, min_interval: float = 0.6, retry_delay: float = 1.2):
+        import threading as _th
+        self._lock = _th.Lock()
+        self._last = 0.0
+        self.min_interval = min_interval
+        self.retry_delay = retry_delay
+
+    def _pace(self) -> None:
+        import time as _t
+        with self._lock:
+            wait = self.min_interval - (_t.monotonic() - self._last)
+            if wait > 0:
+                _t.sleep(wait)
+            self._last = _t.monotonic()
+
+    def call(self, fn, *args, **kwargs):
+        """Paced call of a _yf_* helper. Skips call+retry entirely when
+        yfinance is not importable (permanent for this process); otherwise
+        one retry after `retry_delay` for transient Yahoo 429s."""
+        if _YF_MISSING:
+            return None
+        self._pace()
+        result = fn(*args, **kwargs)
+        if result is None and not _YF_MISSING and self.retry_delay > 0:
+            import time as _t
+            _t.sleep(self.retry_delay)
+            self._pace()
+            result = fn(*args, **kwargs)
+        return result
 
 
 def merge_partial(bars: dict, partial: dict, today: str):
@@ -363,13 +435,28 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     signals, errors = [], 0
     total = len(symbols)
     _auth_warned = [False]   # one-time "Dhan token dead" console warning
+    # the yfinance fallback is PACED process-wide: free-running it (when
+    # Dhan's 24h token is dead) provokes Yahoo 429s and turns a degraded
+    # data day into a zero-data day (the 2026-08-24..28 silent outage)
+    yf_gate = _YfGate(cfg.yf_min_interval, cfg.yf_retry_delay)
+    import threading as _thr
+    _pref_lock = _thr.Lock()
+    _pref_reasons: dict[str, int] = {}
+
+    def _pref_bucket(why: str) -> str:
+        for token in ("weekly RSI", "weekly MACD", "daily candle",
+                      "close", "insufficient"):
+            if token in why:
+                return token if token != "close" else "close < min"
+        return why[:24] or "other"
 
     def scan_one(sym: str):
         """Fetch + detect for one symbol. Returns a 4-tuple
         (sig, err, pref_skipped, near_miss) - EVERY path must return all
         four or run_live's unpack crashes the whole scan (the exact class
         of bug PR #2 fixed for 3-tuples).
-        PRIMARY = Dhan; on ANY failure, INSTANT yfinance fallback (no wait)."""
+        PRIMARY = Dhan; on ANY failure, instant yfinance fallback, PACED
+        via yf_gate so a Dhan outage can't DDoS the fallback."""
         # ---- 1) Dhan ----
         bars = None
         dhan_err = ""
@@ -378,21 +465,24 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                                     force_refresh=force_refresh)
         except DhanAuthError as e:
             # dead/expired token: the client now fails every call instantly,
-            # so the whole run finishes on the yfinance fallback at full speed
+            # so the whole run finishes on the yfinance fallback
             dhan_err = f"DhanAuthError: {e}"[:80]
             if not _auth_warned[0]:
                 _auth_warned[0] = True
                 print("WARNING: Dhan rejected the access token (401/403) - "
                       "scanning continues on the yfinance fallback only. "
-                      "Rotate DHAN_ACCESS_TOKEN to restore Dhan data.",
+                      "DhanHQ tokens are valid ~24 hours: rotate "
+                      "DHAN_ACCESS_TOKEN to restore Dhan data.",
                       file=sys.stderr)
         except Exception as e:  # noqa: BLE001
             dhan_err = str(e)[:60]
         if bars is None or len(bars.get("close", [])) < cfg.min_bars:
-            # ---- 2) instant yfinance fallback ----
-            bars = _yf_daily(sym, from_date, to_date)
+            # ---- 2) instant (but PACED) yfinance fallback ----
+            bars = yf_gate.call(_yf_daily, sym, from_date, to_date)
             if bars is None:
-                return None, dhan_err or "no data (dhan+yf failed)", False, None
+                which = f"dhan[{dhan_err}]+yf[failed]" if dhan_err \
+                    else "no data (dhan+yf failed)"
+                return None, which[:200], False, None
 
         # ---- normalize dates to ISO (epoch-safe, cache-safe) ----
         from dhan_client import _iso_date
@@ -406,6 +496,13 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         if cfg.prefilter_enabled:
             ok, why = passes_prefilter(bars, cfg)
             if not ok:
+                # tally WHY candidates are dropped -> a quiet day must be
+                # explainable ("638 prefilter-skipped: weekly RSI 512,
+                # green daily 97, ...") instead of a black box
+                if isinstance(why, str):
+                    with _pref_lock:
+                        key = _pref_bucket(why)
+                        _pref_reasons[key] = _pref_reasons.get(key, 0) + 1
                 return None, "", True, None
 
         live_merged = False
@@ -418,7 +515,8 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                 except Exception:  # noqa: BLE001
                     partial = None
                 if partial is None:
-                    partial = _yf_intraday_partial(sym, to_date)  # fallback
+                    # paced fallback (same gate as the daily-bar path)
+                    partial = yf_gate.call(_yf_intraday_partial, sym, to_date)
                 if partial:
                     try:
                         bars, live_merged = merge_partial(bars, partial,
@@ -491,13 +589,51 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     dhan_offline = bool(getattr(client, "auth_dead", False) or _auth_warned[0])
     if dhan_offline:
         msg = ("WARNING: Dhan was OFFLINE this run (rejected/expired token) - "
-               "all data came from the yfinance fallback. Rotate "
+               "all data came from the yfinance fallback. "
+               "DhanHQ tokens are valid ~24 hours: rotate "
                "DHAN_ACCESS_TOKEN to restore primary data.")
         print(msg, file=sys.stderr)
-        _summary("data: Dhan OFFLINE (expired token?) - yfinance fallback "
-                 "used; rotate DHAN_ACCESS_TOKEN")
+        _summary("data: Dhan OFFLINE (expired token? they last ~24h) - "
+                 "yfinance fallback used; rotate DHAN_ACCESS_TOKEN")
     else:
         _summary("data: Dhan OK")
+
+    # ---- DATA OUTAGE: most symbols fetched NOTHING (Dhan dead AND the
+    #      yfinance fallback failing). '0 signals' in this state is a lie -
+    #      the scanner was blind. For 4 days around 2026-08-24 every run
+    #      was an outage that looked like a polite quiet day (green check,
+    #      'no pattern signals today'), which is exactly the confusion that
+    #      hid the outage. Make it LOUD: console error annotation, a
+    #      distinct summary line, a dedicated Telegram message, and a
+    #      non-zero exit code (main) so the Actions run turns red. ----
+    outage = (total >= cfg.data_outage_min_symbols
+              and errors >= cfg.data_outage_error_frac * total)
+    outage_text = ""
+    if outage:
+        pct = 100.0 * errors / max(total, 1)
+        outage_text = (
+            f"{errors}/{total} symbols failed to fetch ({pct:.0f}%)"
+            + (" · Dhan OFFLINE (token rejected - DhanHQ tokens last "
+               "~24h, rotate DHAN_ACCESS_TOKEN)" if dhan_offline else "")
+            + (" · yfinance fallback also failing (Yahoo rate-limit?)"
+               if errors else ""))
+        print(f"::error title=Scanner data outage::{outage_text}. This run "
+              f"had NO usable market data - treat '0 signals' as invalid.")
+        print(f"WARNING: DATA OUTAGE - {outage_text}", file=sys.stderr)
+        _summary(f"🛑 data: OUTAGE - {outage_text} - alerts impossible")
+    else:
+        _summary(f"data health: {total - errors}/{total} fetched "
+                 f"({errors} failed)")
+    if _pref_reasons:
+        top = sorted(_pref_reasons.items(), key=lambda kv: -kv[1])[:3]
+        _summary("prefilter rejects: "
+                 + " · ".join(f"{k} {v}" for k, v in top))
+    LAST_RUN_STATS.clear()
+    LAST_RUN_STATS.update({
+        "total": total, "errors": errors, "signals": len(signals),
+        "pref_skipped": pref_skipped, "dhan_offline": dhan_offline,
+        "outage": outage,
+    })
     if errors and err_by_type:
         print("error breakdown:")
         for k, v in sorted(err_by_type.items(), key=lambda kv: -kv[1])[:8]:
@@ -588,7 +724,13 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             stats += (" · near-misses (score < "
                       f"{cfg.score_threshold:.0f}): "
                       + ", ".join(f"{s} {sc:.0f}" for s, sc, _ in near_misses[:5]))
-        sent = notifier.send_signals(signals, scope, stats)
+        if outage:
+            # LOUD outage message FIRST (the polite "no signals today"
+            # summary below would otherwise whitewash a blind scan)
+            sent = 1 if notifier.send_data_outage(outage_text) else 0
+            sent += notifier.send_signals(signals, scope, stats)
+        else:
+            sent = notifier.send_signals(signals, scope, stats)
         print(f"Telegram: {sent} messages sent ({scope})")
 
     return rows
@@ -666,15 +808,22 @@ def main(argv=None) -> int:
                         args.from_days, args.refresh, args.debug,
                         args.intraday, notifier, summary_sink=summary)
         stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
+        outage = bool(LAST_RUN_STATS.get("outage"))
+        result = (f"result: 🛑 DATA OUTAGE - {LAST_RUN_STATS.get('errors', 0)}/"
+                  f"{LAST_RUN_STATS.get('total', 0)} fetches failed; "
+                  f"{len(rows)} signal(s) INVALID") if outage else \
+                 f"result: {len(rows)} signal(s)"
         summary = [f"shakeout scan - {stamp} "
                    f"({'intraday' if args.intraday else 'eod'})"] + summary \
-                  + [f"result: {len(rows)} signal(s)"]
+                  + [result]
         _append_step_summary(summary)
         if args.out:
             _write_summary(args.out + ".summary.txt", summary)
             if rows:
                 _write_csv(rows, args.out)
-        return 0
+        # a data outage is a FAILED scan, not a quiet day: non-zero exit
+        # turns the scheduled Actions run red so it gets investigated
+        return EXIT_DATA_OUTAGE if outage else 0
 
     if args.out and rows:
         _write_csv(rows, args.out)
