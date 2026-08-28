@@ -107,6 +107,16 @@ class DhanThrottledError(RuntimeError):
     """
 
 
+class DhanClientError(RuntimeError):
+    """
+    Dhan answered a 4xx that is neither auth (401/403) nor throttling (429)
+    - e.g. 400 bad payload for this symbol/params. The request shape itself
+    is wrong: retrying it (especially in a zero-sleep loop) only hammers
+    the API and provokes stricter throttling. Raise instantly so the
+    scanner drops this symbol to the yfinance fallback without waiting.
+    """
+
+
 class DhanClient:
     def __init__(self, token: str, client_id: Optional[str] = None,
                  cache_dir: str = "data/cache",
@@ -183,6 +193,13 @@ class DhanClient:
                     raise DhanThrottledError(
                         f"429 rate limited ({path}) - Dhan paused "
                         f"{pause_s:.0f}s, falling back now")
+                # other 4xx (400/404/...): the request itself is malformed
+                # for this symbol - retrying it N times in a zero-sleep
+                # loop just provokes stricter throttling. Fail instantly.
+                if 400 <= r.status_code < 500:
+                    raise DhanClientError(
+                        f"{r.status_code} client error ({path}) "
+                        f"- request not retried")
                 # 5xx: retry IMMEDIATELY (no back-off sleep - the fallback
                 # must not wait behind Dhan retries)
                 if r.status_code in (500, 502, 503, 504) and attempt < self.max_retries - 1:

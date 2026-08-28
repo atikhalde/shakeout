@@ -120,6 +120,28 @@ class ScanConfig:
     # sessions gains at least this much vs the next-day-open entry.
     big_move_pct: float = 8.0
 
+    # ------------------------------------------------------ data health
+    # If this fraction (or more) of symbols fails to FETCH any data (both
+    # Dhan and the yfinance fallback), the run is a DATA OUTAGE: "0 signals"
+    # is meaningless because the scanner was blind. The summary/Telegram
+    # say so loudly, a ::error:: annotation is emitted for the Actions run
+    # page, and main() exits non-zero so the scheduled run turns RED
+    # instead of showing a green "no signals today".
+    # (2026-08-24/28 outage: every run for 4 days scanned ~800 symbols in
+    #  ~60s = everything failed, yet runs showed green + "no signals".)
+    data_outage_error_frac: float = 0.5   # >=50% fetch failures = outage
+    data_outage_min_symbols: int = 25     # ignore tiny local test scans
+    # ---- yfinance fallback pacing --------------------------------------
+    # Root cause of the 2026-08-24 silent-data outage: once Dhan fails fast
+    # (dead 24h token -> 401), ALL ~800 symbols are dumped onto the
+    # yfinance fallback in a free-running multi-worker burst. Yahoo
+    # rate-limits (429) the runner IP almost immediately, every yf call
+    # then fails, and the scan "succeeds" in ~1 min with ZERO data.
+    # The fallback must be globally paced (across all workers) and given
+    # one quick retry for transient 429s, exactly like the Dhan client.
+    yf_min_interval: float = 0.6          # min seconds between Yahoo calls
+    yf_retry_delay: float = 1.2           # one retry after a short pause
+
     # --------------------------------------------------------- prefilter
     # Panel conditions that narrow the universe BEFORE the pattern scan.
     prefilter_enabled: bool = True

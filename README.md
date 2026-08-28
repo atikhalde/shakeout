@@ -56,6 +56,13 @@ Expected output (all three stocks flagged on their exact reversal dates):
 
 ## Live scan with your Dhan API
 
+> ⚠️ **DhanHQ access tokens are valid ~24 HOURS** (exchange regulation). A
+> token pasted into `.env` or a GitHub secret is dead a day later — most
+> "no alerts for days" issues come down to this. Rotate it daily, automate
+> renewal (`GET /v2/RenewToken`, before expiry), or use the 12-month API
+> key + secret flow. With a dead token the scanner automatically runs on
+> the **paced yfinance fallback** (see *🛑 Data-outage protection* below).
+
 1. Get your token: Dhan → Settings → API → create app → copy the **access
    token** (and note the **client id** if your setup uses one).
 2. Set environment variables (or pass `--token` / `--client-id`):
@@ -83,6 +90,27 @@ Notes on the live mode:
   `config.py`); the full ~2000-symbol universe takes a few minutes.
 - If Dhan changes the JSON shape, adjust `_parse_ohlc` in `dhan_client.py`
   (it already handles columnar and row formats).
+
+### 🛑 Data-outage protection (2026-08-28)
+
+A scanner that can't fetch data must not look like a healthy quiet day.
+Run health is now verified on every scan:
+
+- If **≥ 50% of symbols fail to fetch** (dead Dhan token AND the yfinance
+  fallback failing), the run is a **data outage**: the Actions log gets a
+  `::error::` annotation, the run-page summary a `🛑 data: OUTAGE` line,
+  Telegram gets **"🛑 SCAN DEGRADED — data outage"** (instead of "No
+  pattern signals today"), and `scanner.py` exits **3** so the scheduled
+  workflow run turns **red**.
+- The yfinance fallback is **paced process-wide** (`yf_min_interval`,
+  default 0.6 s across all workers) with one retry — an un-paced burst
+  against Yahoo is what turned the dead-token days of 2026-08-24..28 into
+  four days of blind, green-looking "0 signals" runs.
+- The fallback fetches `end = to_date + 1` (yfinance's `end` is exclusive),
+  so fallback-carried runs no longer scan the market as of yesterday.
+- Every quiet-day summary now shows `data health: N/M fetched` and a
+  `prefilter rejects:` tally, so "why no alerts?" is answerable from the
+  run page alone.
 
 ## 🔔 Telegram alerts (direct to your phone)
 

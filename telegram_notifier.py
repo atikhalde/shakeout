@@ -173,6 +173,16 @@ class TelegramNotifier:
                 f"candle, still below peak.{tail}")
 
     # ----------------------------------------------------------- batch helpers
+    def send_data_outage(self, text: str) -> bool:
+        """A data outage is NOT a quiet day: when most symbols fail to fetch
+        (dead Dhan token + yfinance also failing), the scanner was blind and
+        'no pattern signals today' would be a lie. Send a distinct, loud
+        message so the user fixes the data source instead of waiting for
+        alerts that can never fire."""
+        return self.send(f"🛑 <b>SCAN DEGRADED — data outage</b>\n{text}\n"
+                         f"Patterns cannot be detected without data, so no "
+                         f"alerts were possible this run.")
+
     def send_signals(self, signals: list[dict], scope: str = "NSE universe",
                      stats: str = "") -> int:
         """Send one message per signal + a summary. Returns # messages sent."""

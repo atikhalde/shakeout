@@ -868,6 +868,238 @@ def test_indicators() -> None:
           np.isnan(rolling_max(np.array([1.0, 2.0]), 3)).all())
 
 
+def test_data_outage_detection() -> None:
+    """Regression (2026-08-28 root cause): for 4 days every scheduled run
+    failed to fetch data for ~800/800 symbols (dead 24h Dhan token +
+    burst-throttled yfinance fallback), yet the run showed GREEN with a
+    polite 'no pattern signals today'. A data outage must NOT masquerade
+    as a quiet day: run_live flags it, main() exits non-zero (red CI run),
+    the summary carries an OUTAGE line and the notifier gets the loud
+    outage message - while a small watchlist scan still exits 0."""
+    print("== data outage: loud, non-zero exit (never a silent quiet day) ==")
+    import os
+    import tempfile
+    import unittest.mock as mock
+    import scanner as scanner_mod
+    import dhan_client as dhan_mod
+
+    class DeadClient:
+        auth_dead = True
+        def __init__(self, *a, **k): pass
+        def get_instruments(self): return {f"S{i}": str(i) for i in range(40)}
+        def liquid_universe(self): return [f"S{i}" for i in range(40)]
+        def resolve_symbol(self, s): return "1"
+        def get_daily(self, *a, **k):
+            raise dhan_mod.DhanAuthError("401 dead token")
+        def intraday_partial(self, *a, **k): return None
+
+    class PartialClient(DeadClient):
+        # 10 of 40 symbols fail (25%) -> below the 50% outage threshold
+        OK = {f"S{i}" for i in range(30)}
+        def __init__(self, good_bars, *a, **k):
+            self._good = good_bars
+        def get_daily(self, sym, *a, **k):
+            if str(sym) in self.OK:
+                return {k: list(v) for k, v in self._good.items()}
+            raise dhan_mod.DhanAuthError("401 dead token")
+
+    from demo_data import demo_universe
+    _dates, _bars, _exp = demo_universe()["SPORTKING"]
+    good_bars = {k: list(v) for k, v in _bars.items()}
+    good_bars["dates"] = list(_dates)
+
+    class FakeNotifier:
+        def __init__(self): self.outages, self.signal_calls = [], []
+        def send_data_outage(self, text):
+            self.outages.append(text); return True
+        def send_signals(self, signals, scope, stats=""):
+            self.signal_calls.append((signals, stats)); return 1
+
+    wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
+    with open(wl, "w") as f:
+        f.write("\n".join(f"S{i}" for i in range(40)) + "\n")
+
+    # ---- full outage: 40/40 fail ---------------------------------------
+    cfg = ScanConfig()
+    cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "tracker.csv")
+    fn = FakeNotifier()
+    with mock.patch.object(dhan_mod, "DhanClient", DeadClient), \
+         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None), \
+         mock.patch.object(scanner_mod, "_YfGate",
+                           lambda *a, **k: scanner_gate_stub()):
+        summary: list = []
+        scanner_mod.run_live(cfg, "tok", "cid", limit=0, watchlist=wl,
+                             from_days=400, force_refresh=False, debug=False,
+                             intraday=False, notifier=fn,
+                             summary_sink=summary)
+    st = scanner_mod.LAST_RUN_STATS
+    check("40/40 fetch failures flagged as outage", st.get("outage") is True,
+          st)
+    check("outage in LAST_RUN_STATS (errors/total)",
+          st.get("errors") == 40 and st.get("total") == 40, st)
+    check("summary carries the OUTAGE line",
+          any("OUTAGE" in l for l in summary), summary)
+    check("notifier got the LOUD outage message (not just 'no signals')",
+          len(fn.outages) == 1 and "40/40" in fn.outages[0], fn.outages)
+
+    # ---- main() exits non-zero on outage (the Actions step goes red) ----
+    tmp = tempfile.mkdtemp()
+    env = {"DHAN_ACCESS_TOKEN": "tok", "GITHUB_STEP_SUMMARY": "",
+           "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""}
+    with mock.patch.object(dhan_mod, "DhanClient", DeadClient), \
+         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None), \
+         mock.patch.object(scanner_mod, "_YfGate",
+                           lambda *a, **k: scanner_gate_stub()), \
+         mock.patch.dict(os.environ, env):
+        rc = scanner_mod.main(["--mode", "live", "--watchlist", wl])
+    check("main() returns the data-outage exit code",
+          rc == scanner_mod.EXIT_DATA_OUTAGE, rc)
+
+    # ---- small watchlist: all-fail is NOT an outage (local tests quiet) --
+    wl_small = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
+    with open(wl_small, "w") as f:
+        f.write("S0\nS1\n")
+    with mock.patch.object(dhan_mod, "DhanClient", DeadClient), \
+         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None), \
+         mock.patch.object(scanner_mod, "_YfGate",
+                           lambda *a, **k: scanner_gate_stub()):
+        scanner_mod.run_live(cfg, "tok", "cid", limit=0, watchlist=wl_small,
+                             from_days=400, force_refresh=False, debug=False,
+                             intraday=False, notifier=None, summary_sink=[])
+    check("tiny watchlist all-fail is NOT flagged as outage",
+          scanner_mod.LAST_RUN_STATS.get("outage") is False,
+          scanner_mod.LAST_RUN_STATS)
+
+    # ---- 25% failures: degraded but healthy enough -> no outage ---------
+    with mock.patch.object(dhan_mod, "DhanClient",
+                           lambda *a, **k: PartialClient(good_bars)), \
+         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None), \
+         mock.patch.object(scanner_mod, "_YfGate",
+                           lambda *a, **k: scanner_gate_stub()):
+        fn2 = FakeNotifier()
+        scanner_mod.run_live(cfg, "tok", "cid", limit=0, watchlist=wl,
+                             from_days=400, force_refresh=False, debug=False,
+                             intraday=False, notifier=fn2, summary_sink=[])
+    check("25% failures is NOT an outage",
+          scanner_mod.LAST_RUN_STATS.get("outage") is False
+          and scanner_mod.LAST_RUN_STATS.get("errors") == 10,
+          scanner_mod.LAST_RUN_STATS)
+    check("no outrage message for a healthy-but-imperfect run",
+          len(fn2.outages) == 0, fn2.outages)
+
+
+def scanner_gate_stub():
+    """Zero-delay stand-in for _YfGate so run_live tests stay instant."""
+    class _Stub:
+        def call(self, fn, *a, **k):
+            return fn(*a, **k)
+    return _Stub()
+
+
+def test_yf_gate_pacing() -> None:
+    """The _YfGate must globally pace yfinance calls (the un-paced burst is
+    what got the runner IP 429'd on 2026-08-24) and short-circuit entirely
+    when yfinance is not importable."""
+    print("== _YfGate: global pacing + missing-module short-circuit ==")
+    import time as _time
+    import scanner as scanner_mod
+
+    gate = scanner_mod._YfGate(min_interval=0.25, retry_delay=0.0)
+    calls = []
+    def fn(x):
+        calls.append(x); return x
+    t0 = _time.monotonic()
+    gate.call(fn, 1); gate.call(fn, 2); gate.call(fn, 3)
+    el = _time.monotonic() - t0
+    check("3 calls through the gate take >= 2 intervals",
+          el >= 0.5, f"{el:.2f}s")
+    check("all calls actually executed", calls == [1, 2, 3], calls)
+
+    ok_gate = scanner_mod._YfGate(min_interval=0.0, retry_delay=0.3)
+    tries = {"n": 0}
+    def flaky():
+        tries["n"] += 1
+        return None if tries["n"] == 1 else {"ok": True}
+    got = ok_gate.call(flaky)
+    check("one retry on failure then success",
+          got == {"ok": True} and tries["n"] == 2, tries)
+
+    orig = scanner_mod._YF_MISSING
+    scanner_mod._YF_MISSING = True
+    try:
+        ran = {"n": 0}
+        def should_not_run():
+            ran["n"] += 1
+            return 1
+        t0 = _time.monotonic()
+        got = scanner_mod._YfGate(min_interval=5.0,
+                                  retry_delay=5.0).call(should_not_run)
+        el_miss = _time.monotonic() - t0
+        check("yfinance-missing -> None instantly, no pacing, no retry",
+              got is None and ran["n"] == 0 and el_miss < 0.5, ran)
+    finally:
+        scanner_mod._YF_MISSING = orig
+
+
+def test_dhan_client_4xx_fail_fast() -> None:
+    """4xx (non-auth, non-429) must fail in ONE attempt: instant 3x
+    zero-sleep retries just hammer the API and provoke throttling."""
+    print("== dhan client: 4xx fails fast (no zero-sleep hammering) ==")
+    import tempfile
+    import time as _time
+    import unittest.mock as mock
+    import requests
+    import dhan_client as dhan_mod
+
+    class FakeResp:
+        def __init__(self, status): self.status_code = status; self.text = "x"
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    calls = {"n": 0}
+    def post_400(*a, **k):
+        calls["n"] += 1
+        return FakeResp(400)
+    c = dhan_mod.DhanClient("tok", cache_dir=tempfile.mkdtemp(),
+                            min_interval=0.0, timeout=5.0)
+    with mock.patch.object(dhan_mod.requests, "post", post_400):
+        t0 = _time.monotonic()
+        try:
+            c._post("/v2/charts/historical", {})
+            raised = None
+        except Exception as e:
+            raised = e
+        el = _time.monotonic() - t0
+    check("400 raises DhanClientError in ONE attempt (<1s)",
+          isinstance(raised, dhan_mod.DhanClientError)
+          and calls["n"] == 1 and el < 1.0,
+          f"type={type(raised).__name__} calls={calls['n']} {el:.2f}s")
+    check("400 does NOT mark the token dead (request problem, not auth)",
+          c.auth_dead is False)
+
+
+def test_yf_daily_end_is_inclusive() -> None:
+    """yfinance history(end=...) is EXCLUSIVE; _yf_daily must add +1 day or
+    fallback-only runs silently scan the market as of yesterday."""
+    print("== yfinance fallback: end date inclusive (to_date+1) ==")
+    import datetime as dt
+    import unittest.mock as mock
+    import scanner as scanner_mod
+
+    captured = {}
+    class FakeTicker:
+        def __init__(self, sym): pass
+        def history(self, **kw):
+            captured.update(kw)
+            raise RuntimeError("stop here - we only inspect the args")
+    with mock.patch("yfinance.Ticker", FakeTicker):
+        scanner_mod._yf_daily("RELIANCE", dt.date(2026, 7, 1),
+                              dt.date(2026, 8, 28))
+    check("history() called with end = to_date + 1 day (inclusive)",
+          captured.get("end") == dt.date(2026, 8, 29), captured)
+
+
 def main() -> int:
     global PASS, FAIL
     test_indicators()
@@ -884,6 +1116,10 @@ def main() -> int:
     test_fail_fast_dhan_to_yfinance()
     test_run_live_all_scan_one_paths()
     test_quiet_run_artifacts_and_summary()
+    test_data_outage_detection()
+    test_yf_gate_pacing()
+    test_dhan_client_4xx_fail_fast()
+    test_yf_daily_end_is_inclusive()
     test_negatives()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1
