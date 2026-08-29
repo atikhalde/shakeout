@@ -533,6 +533,15 @@ def write_excel(rows: list[dict], path: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    # Keep the old workflow flags as hidden compatibility options. The
+    # backtest was refactored to Yahoo-only, but an already-published GitHub
+    # Actions workflow may still pass these flags while it is being updated.
+    # Accepting and ignoring them prevents an argparse failure from stopping
+    # the run; no Dhan or daily-bar cache is used by this implementation.
+    ap.add_argument("--source", choices=["dhan", "yfinance"],
+                    default="yfinance", help=argparse.SUPPRESS)
+    ap.add_argument("--no-cache", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--symbols-file", default=None)
     ap.add_argument("--years", type=int, default=None,
                     help="years of history (overridden by --period)")
@@ -556,6 +565,13 @@ def main() -> int:
                     help="override: fetch N calendar days of history "
                          "(overridden by --period)")
     args = ap.parse_args()
+
+    if args.source == "dhan":
+        print("NOTICE: --source dhan is deprecated; this backtest uses "
+              "Yahoo Finance only.")
+    if args.no_cache or args.resume:
+        print("NOTICE: cache/resume flags are deprecated; this backtest "
+              "does not use a daily-bar cache.")
 
     cfg = ScanConfig()
     if args.min_score is not None:
