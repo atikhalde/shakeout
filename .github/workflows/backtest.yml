@@ -6,7 +6,8 @@ name: Backtest
 # Results: signals_backtest.csv artifact + summary on the run page.
 #
 # Inputs:
-#   years      = how many years of history (default 5)
+#   period     = time period preset (1m, 6m, 1y, 2y, 5y) - overrides years
+#   years      = how many years of history (default 5) - used if period is empty
 #   limit      = max symbols to scan (0 = whole liquid universe ~2145).
 #                Start with 300-500 to see the speed, then go full.
 #   min_score  = only report signals with score >= this (default 70)
@@ -16,8 +17,19 @@ name: Backtest
 "on":
   workflow_dispatch:
     inputs:
+      period:
+        description: "Time period preset (overrides years)"
+        type: choice
+        options:
+          - ""
+          - "1m"
+          - "6m"
+          - "1y"
+          - "2y"
+          - "5y"
+        default: ""
       years:
-        description: "Years of history"
+        description: "Years of history (ignored if period is set)"
         type: number
         default: 5
       limit:
@@ -73,14 +85,20 @@ jobs:
 
       - name: Run backtest
         run: |
-          python backtest.py \
-            --source dhan \
-            --years ${{ inputs.years }} \
-            --limit ${{ inputs.limit }} \
-            --min-score ${{ inputs.min_score }} \
-            --min-mcap ${{ inputs.min_mcap }} \
-            ${{ inputs.no_cache && '--no-cache' || '' }} \
-            --out signals_backtest.csv
+          ARGS="--source dhan"
+          if [ -n "${{ inputs.period }}" ]; then
+            ARGS="$ARGS --period ${{ inputs.period }}"
+          else
+            ARGS="$ARGS --years ${{ inputs.years }}"
+          fi
+          ARGS="$ARGS --limit ${{ inputs.limit }}"
+          ARGS="$ARGS --min-score ${{ inputs.min_score }}"
+          ARGS="$ARGS --min-mcap ${{ inputs.min_mcap }}"
+          if [ "${{ inputs.no_cache }}" = "true" ]; then
+            ARGS="$ARGS --no-cache"
+          fi
+          ARGS="$ARGS --out signals_backtest.csv"
+          python backtest.py $ARGS
 
       - name: Upload signals (CSV + Excel)
         if: always()
