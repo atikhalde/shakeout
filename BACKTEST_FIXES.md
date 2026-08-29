@@ -73,14 +73,14 @@ Added a new `--period` CLI argument with 5 presets:
 **CLI Usage:**
 ```bash
 # Time period presets
-python backtest.py --source dhan --period 1m --limit 300
-python backtest.py --source dhan --period 6m --limit 300
-python backtest.py --source dhan --period 1y --limit 500
-python backtest.py --source dhan --period 2y --limit 500
-python backtest.py --source dhan --period 5y --limit 0
+python backtest.py --period 1m --limit 300
+python backtest.py --period 6m --limit 300
+python backtest.py --period 1y --limit 500
+python backtest.py --period 2y --limit 500
+python backtest.py --period 5y --limit 0
 
-# Yahoo Finance (no token needed)
-python backtest.py --source yfinance --period 2y --limit 100
+# smaller local run (Yahoo Finance data - no token needed)
+python backtest.py --period 2y --limit 100
 ```
 
 **GitHub Actions:** Added dropdown in `backtest.yml` workflow:
@@ -150,7 +150,7 @@ The backtest now applies all 18 filters that the scanner uses:
 
 ### Quick Backtest (1 Month)
 ```bash
-python backtest.py --source dhan --period 1m --limit 300 --min-score 70
+python backtest.py --period 1m --limit 300 --min-score 70
 ```
 - Fetches 30 days of history
 - Scans first 300 symbols
@@ -159,7 +159,7 @@ python backtest.py --source dhan --period 1m --limit 300 --min-score 70
 
 ### Medium Backtest (6 Months)
 ```bash
-python backtest.py --source dhan --period 6m --limit 500 --min-score 70
+python backtest.py --period 6m --limit 500 --min-score 70
 ```
 - Fetches 180 days of history
 - Scans first 500 symbols
@@ -168,31 +168,30 @@ python backtest.py --source dhan --period 6m --limit 500 --min-score 70
 
 ### Standard Backtest (2 Years)
 ```bash
-python backtest.py --source dhan --period 2y --limit 0 --min-score 70
+python backtest.py --period 2y --limit 0 --min-score 70
 ```
 - Fetches 730 days of history
-- Scans all ~2,145 liquid symbols
+- Scans the full static universe (~230 liquid names)
 - Runtime: ~5-8 minutes
 - Use case: Validate pattern performance
 
 ### Full Backtest (5 Years)
 ```bash
-python backtest.py --source dhan --period 5y --limit 0 --min-score 70
+python backtest.py --period 5y --limit 0 --min-score 70
 ```
 - Fetches 1,825 days of history
-- Scans all ~2,145 liquid symbols
+- Scans the full static universe (~230 liquid names)
 - Runtime: ~8-12 minutes
 - Use case: Long-term statistical analysis
 
-### Yahoo Finance (No Token)
+### Local Quick Run (No API Token)
 ```bash
-python backtest.py --source yfinance --period 2y --limit 100 --min-score 70
+python backtest.py --period 2y --limit 100 --min-score 70
 ```
-- Uses Yahoo Finance instead of Dhan API
-- No DHAN_ACCESS_TOKEN needed
-- Scans first 100 symbols from hardcoded UNIVERSE list
+- Data comes from Yahoo Finance - no DHAN_ACCESS_TOKEN (or any token) needed
+- Scans first 100 symbols from the hardcoded UNIVERSE list
 - Runtime: ~2-3 minutes
-- Use case: Quick local testing without API credentials
+- Use case: Quick local testing
 
 ---
 
@@ -200,7 +199,7 @@ python backtest.py --source yfinance --period 2y --limit 100 --min-score 70
 
 ```
 period preset: 2y = 730 days
-source=dhan universe=500 symbols, period=2y, 2.0y window, min_score=70.0
+source=yfinance universe=500 symbols, period=2y, 2.0y window, min_score=70.0
 mcap filter: 500 -> 487 symbols (>= 1000 Cr)
   1/500   RELIANCE     bars= 730 signals=2
   2/500   TCS          bars= 730 signals=1

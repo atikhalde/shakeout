@@ -803,6 +803,61 @@ def test_backtest_finds_verified_stocks() -> None:
             check(f"{sym} has recent flag", "recent" in hit[0])
 
 
+def test_backtest_avg_volume_no_lookahead() -> None:
+    """Regression: the backtest avg_volume filter must average volume up to
+    each candidate day t ONLY (v[:t+1], exactly like the live scanner whose
+    volume array ends at the signal day). Averaging over the FULL volume
+    series is look-ahead bias - future liquidity leaks into historical
+    signals (a stock illiquid on day t "passes" because it became liquid
+    later) and, conversely, a post-signal volume drought wrongly kills a
+    valid historical signal (the tail-average drops below min_avg_volume).
+    """
+    print("== backtest avg_volume filter: no look-ahead ==")
+    import datetime as dt
+    import numpy as np
+    import backtest as bt
+    from config import ScanConfig
+    from demo_data import demo_universe
+
+    cfg = ScanConfig()
+    dates, bars, sig_date = demo_universe()["SPORTKING"]
+
+    # append low-volume flat bars AFTER the verified signal: real history
+    # up to the signal day is untouched, but the tail of the full series
+    # now averages ~1,000 shares/day (way below min_avg_volume) - so a
+    # look-ahead tail-average wrongly rejects the historical signal while
+    # the corrected t-sliced average still finds it.
+    ext = {k: list(np.asarray(v, float)) for k, v in bars.items()
+           if k not in ("symbol", "dates")}
+    dts = list(dates)
+    d = dt.date.fromisoformat(dts[-1])
+    for _ in range(cfg.volume_lookback + 10):
+        d += dt.timedelta(days=1)
+        while d.weekday() >= 5:
+            d += dt.timedelta(days=1)
+        dts.append(d.isoformat())
+        ext["open"].append(ext["close"][-1])
+        ext["high"].append(ext["close"][-1] * 1.001)
+        ext["low"].append(ext["close"][-1] * 0.999)
+        ext["close"].append(ext["close"][-1])
+        ext["volume"].append(1_000.0)
+    bars2 = {k: np.array(v, float) for k, v in ext.items()}
+    bars2["dates"] = dts
+
+    from indicators import avg_volume
+    check("appended tail average is below min_avg_volume (setup valid)",
+          avg_volume(np.array(ext["volume"]), cfg.volume_lookback)
+          < cfg.min_avg_volume)
+
+    rows = []
+    bt.backtest_symbol("SPORTKING", cfg, bars2, rows)
+    hit = [r for r in rows
+           if r["symbol"] == "SPORTKING" and r["date"] == sig_date]
+    check("historical signal survives a post-signal volume drought "
+          "(avg_volume used only data up to day t)", len(hit) == 1,
+          f"dates found: {[r['date'] for r in rows]}")
+
+
 def test_tracker() -> None:
     print("== signal tracking sheet ==")
     import os, tempfile, datetime as dt
@@ -1110,6 +1165,7 @@ def main() -> int:
     test_positives()
     test_aci_26w_proximity()
     test_backtest_finds_verified_stocks()
+    test_backtest_avg_volume_no_lookahead()
     test_tracker()
     test_run_live_unpack()
     test_cross_run_cooldown_and_summary()

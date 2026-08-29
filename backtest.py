@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Backtest the shakeout scanner on REAL historical data from the DHAN API
-(runs inside GitHub Actions with your DHAN_ACCESS_TOKEN secret).
+Backtest the shakeout scanner on REAL historical data from Yahoo Finance
+(no API token needed - runs locally and inside GitHub Actions).
 
 For every trading day in the window it runs the SAME logic as the live
 scanner (BOS -> flush -> SSL hold -> reversal, + 26W-high proximity guard,
@@ -19,19 +19,17 @@ scanner (BOS -> flush -> SSL hold -> reversal, + 26W-high proximity guard,
     fire on the highest-quality setups.
 
 Usage:
-    # Dhan API (default - uses DHAN_ACCESS_TOKEN / DHAN_CLIENT_ID env vars):
-    python backtest.py --source dhan --years 2 --limit 500 --min-score 55
+    pip install yfinance
 
     # Time period presets (1 month, 6 months, 1 year, 2 years, 5 years):
-    python backtest.py --source dhan --period 1m --limit 300
-    python backtest.py --source dhan --period 6m --limit 300
-    python backtest.py --source dhan --period 1y --limit 500
-    python backtest.py --source dhan --period 2y --limit 500
-    python backtest.py --source dhan --period 5y --limit 0
+    python backtest.py --period 1m --limit 300
+    python backtest.py --period 6m --limit 300
+    python backtest.py --period 1y --limit 500
+    python backtest.py --period 2y --limit 500
+    python backtest.py --period 5y --limit 0
 
-    # Yahoo Finance (local quick run, no token needed):
-    pip install yfinance
-    python backtest.py --source yfinance --period 2y --limit 100
+    # or an explicit window / score threshold:
+    python backtest.py --years 2 --limit 500 --min-score 55
 
 Output: signals_backtest.csv + signals_backtest.xlsx (Excel with a
         'Signals' sheet containing EVERY signal incl. full score component
@@ -52,12 +50,13 @@ import time
 import numpy as np
 
 from config import ScanConfig
-from dhan_client import DhanClient, _iso_date
+from indicators import avg_volume
 from pattern import _score
 from prefilter import passes_prefilter
 
 # ---------------------------------------------------------------------------
-# universe (used for source=yfinance and as fallback)
+# universe (static list of liquid NSE names - the backtest no longer calls
+# the Dhan API, so the scrip-master universe is not available here)
 # ---------------------------------------------------------------------------
 UNIVERSE = [
     "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "SBIN", "BHARTIARTL",
@@ -97,6 +96,59 @@ UNIVERSE = [
     "TORNTPHARM", "TORNTPOWER", "UCOBANK", "UNOMINDA", "VBL", "VIPIND",
     "WELCORP", "WESTLIFE", "WHIRLPOOL", "ZYDUSLIFE",
 ]
+
+
+# ---------------------------------------------------------------------------
+# data: Yahoo Finance (the only source)
+# ---------------------------------------------------------------------------
+# NSE symbol -> Yahoo symbol (renamed listings)
+_YF_ALIASES = {"SPR_AUTO": "SHRIPISTON"}
+
+
+def _fetch_yfinance(sym: str, start: dt.date, end: dt.date) -> dict | None:
+    """Daily bars for ONE symbol from Yahoo Finance; None when no data.
+
+    yfinance history(end=...) is EXCLUSIVE, so +1 day is added (the same
+    fix the live scanner's _yf_daily applies) - otherwise the newest bar
+    is silently dropped.
+    """
+    import yfinance as yf
+    yf_sym = _YF_ALIASES.get(sym, sym)
+    df = yf.Ticker(f"{yf_sym}.NS").history(
+        start=start, end=end + dt.timedelta(days=1), auto_adjust=True)
+    if df is None or df.empty:
+        return None
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    if df.empty:
+        return None
+    return {
+        "open": df["Open"].to_numpy(float),
+        "high": df["High"].to_numpy(float),
+        "low": df["Low"].to_numpy(float),
+        "close": df["Close"].to_numpy(float),
+        "volume": df["Volume"].to_numpy(float),
+        "dates": [d.date().isoformat() for d in df.index],
+    }
+
+
+class _Pacer:
+    """Serial pacer: enforce a minimum gap between Yahoo calls.
+
+    An un-paced burst of history() calls gets the runner IP 429-rate-
+    limited by Yahoo almost immediately (the 2026-08-24 silent-outage
+    lesson that produced the live scanner's _YfGate). The backtest loop
+    is serial, so a simple monotonic-clock pacer is enough.
+    """
+
+    def __init__(self, min_interval: float) -> None:
+        self.min_interval = min_interval
+        self._last = 0.0
+
+    def wait(self) -> None:
+        gap = self.min_interval - (time.monotonic() - self._last)
+        if gap > 0:
+            time.sleep(gap)
+        self._last = time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -253,10 +305,17 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
                 print(f"    [{dates[t]}] price {c[t]:.1f} < {cfg.min_price}")
             continue
         # avg_volume: reject illiquid stocks
-        from indicators import avg_volume as _avg_volume
-        if _avg_volume(v, cfg.volume_lookback) < cfg.min_avg_volume:
+        # CRITICAL: slice to day t (v[:t+1]) like the prefilter above -
+        # the live scanner's volume array ENDS at the signal day, so the
+        # 20-day average must too. Using the full series `v` is look-ahead
+        # bias: future volume leaks into historical signals (an illiquid
+        # stock passes because it became liquid later, and a valid signal
+        # is rejected when the stock's volume dries up AFTER day t).
+        avg_vol = avg_volume(v[:t + 1], cfg.volume_lookback)
+        if avg_vol < cfg.min_avg_volume:
             if dbg and dates[t] >= "2026-07-20":
-                print(f"    [{dates[t]}] avg_volume < {cfg.min_avg_volume}")
+                print(f"    [{dates[t]}] avg_volume {avg_vol:,.0f} < "
+                      f"{cfg.min_avg_volume:,.0f}")
             continue
 
         # --------------------- score (same formula) --------------------
@@ -474,7 +533,6 @@ def write_excel(rows: list[dict], path: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", choices=["dhan", "yfinance"], default="dhan")
     ap.add_argument("--symbols-file", default=None)
     ap.add_argument("--years", type=int, default=None,
                     help="years of history (overridden by --period)")
@@ -487,13 +545,6 @@ def main() -> int:
     ap.add_argument("--out", default="signals_backtest.csv")
     ap.add_argument("--limit", type=int, default=0,
                     help="scan only the first N symbols (0 = all)")
-    ap.add_argument("--no-cache", action="store_true",
-                    help="ignore the daily-bar cache (rebuild it fresh) "
-                         "- use once if the cache is polluted from failed "
-                         "runs, then drop it")
-    ap.add_argument("--resume", action="store_true",
-                    help="skip symbols already in the daily-bar cache "
-                         "(resume after a throttled/cancelled run)")
     ap.add_argument("--min-mcap", type=float, default=1000,
                     help="only backtest symbols with market cap >= this many "
                          "crores (uses data/market_cap.csv; 1000 = liquid "
@@ -530,25 +581,6 @@ def main() -> int:
         with open(args.symbols_file) as f:
             symbols = [ln.strip().upper() for ln in f
                        if ln.strip() and not ln.strip().startswith("#")]
-    elif args.source == "dhan":
-        from dhan_client import DhanClient
-        token = os.environ.get("DHAN_ACCESS_TOKEN")
-        client_id = os.environ.get("DHAN_CLIENT_ID")
-        if not token:
-            print("ERROR: set DHAN_ACCESS_TOKEN (and DHAN_CLIENT_ID) to run "
-                  "with source=dhan, or use --source yfinance.", file=sys.stderr)
-            return 2
-        # backtest fetches years of data per symbol - use a gentler rate
-        # (1.2s between calls, serial) to avoid Dhan's 429 on the shared
-        # GitHub runner IP; slower but completes instead of dying
-        client = DhanClient(token, client_id,
-                            min_interval=cfg.request_interval)
-        try:
-            symbols = client.liquid_universe()
-        except Exception as e:  # noqa: BLE001
-            print(f"WARNING: liquid_universe failed ({e}); "
-                  f"using static list", file=sys.stderr)
-            symbols = list(UNIVERSE)
     else:
         symbols = list(UNIVERSE)
     if args.min_mcap:
@@ -561,14 +593,10 @@ def main() -> int:
                   f"(>= {args.min_mcap:.0f} Cr)")
         else:
             print(f"WARNING: {cfg.mcap_file} not found - min-mcap skipped")
-    # NOTE: no --resume symbol filter here - get_daily() already reads the
-    # daily-bar cache automatically, so re-runs are fast WITHOUT dropping
-    # symbols from analysis (a resume filter caused universe=0 when the
-    # whole cache was populated - every symbol was skipped).
     if args.limit:
         symbols = symbols[:args.limit]
     period_info = f", period={args.period}" if args.period else ""
-    print(f"source={args.source} universe={len(symbols)} symbols{period_info}, "
+    print(f"source=yfinance universe={len(symbols)} symbols{period_info}, "
           f"{args.years or (args.days/365):.1f}y window, min_score={cfg.score_threshold}")
 
     end = dt.date.today()
@@ -578,71 +606,23 @@ def main() -> int:
     errors = 0
     t0 = time.time()
 
-    skipped_429 = 0
-    consec_429 = 0
-    fast_skip = False
-    rate_limit_streak = 0
+    pacer = _Pacer(cfg.yf_min_interval)
     for i, sym in enumerate(symbols, 1):
         try:
-            if args.source == "dhan":
-                # ----- PRIMARY = DHAN: try once, NO waiting/retries ----
-                bars = None
-                dhan_err = ""
-                try:
-                    bars = client.get_daily(sym, start, end)
-                except Exception as e:  # noqa: BLE001
-                    dhan_err = str(e)[:80]
-                if bars is None or len(bars.get("close", [])) < cfg.min_bars:
-                    if bars is None:
-                        raw = getattr(client, "_last_raw", "")[:100]
-                        dhan_err = dhan_err or f"none [dhan: {raw}]"
-                    else:
-                        dhan_err = dhan_err or "too few bars"
-                    # ----- INSTANT FAILOVER to yfinance for THIS symbol ----
-                    # (no waiting: Dhan failed -> fetch from Yahoo right now)
-                    try:
-                        import yfinance as yf
-                        yf_sym = {"SPR_AUTO": "SHRIPISTON"}.get(sym, sym)
-                        df = yf.Ticker(f"{yf_sym}.NS").history(
-                            start=start, end=end, auto_adjust=True)
-                        if df is not None and not df.empty:
-                            df = df.dropna(subset=["Open", "High", "Low", "Close"])
-                            bars = {
-                                "open": df["Open"].to_numpy(float),
-                                "high": df["High"].to_numpy(float),
-                                "low": df["Low"].to_numpy(float),
-                                "close": df["Close"].to_numpy(float),
-                                "volume": df["Volume"].to_numpy(float),
-                                "dates": [d.date().isoformat() for d in df.index],
-                            }
-                            skipped_429 += 1  # counted as yfinance fallback
-                    except Exception:  # noqa: BLE001
-                        pass
-                    if bars is None or len(bars.get("close", [])) < cfg.min_bars:
-                        errors += 1
-                        print(f"  {i}/{len(symbols)} {sym:12s} FAIL "
-                              f"(dhan: {dhan_err[:70]})", flush=True)
-                        continue
-                    print(f"  {i}/{len(symbols)} {sym:12s} yfinance-fallback "
-                          f"(dhan: {dhan_err[:50]})", flush=True)
-                else:
-                    bars["dates"] = [_iso_date(d) for d in bars["dates"]]
-            else:
-                import yfinance as yf
-                yf_sym = {"SPR_AUTO": "SHRIPISTON"}.get(sym, sym)
-                df = yf.Ticker(f"{yf_sym}.NS").history(
-                    start=start, end=end, auto_adjust=True)
-                if df is None or df.empty:
-                    raise ValueError("empty")
-                df = df.dropna(subset=["Open", "High", "Low", "Close"])
-                bars = {
-                    "open": df["Open"].to_numpy(float),
-                    "high": df["High"].to_numpy(float),
-                    "low": df["Low"].to_numpy(float),
-                    "close": df["Close"].to_numpy(float),
-                    "volume": df["Volume"].to_numpy(float),
-                    "dates": [d.date().isoformat() for d in df.index],
-                }
+            pacer.wait()
+            bars = _fetch_yfinance(sym, start, end)
+            if (bars is None or len(bars.get("close", [])) < cfg.min_bars) \
+                    and cfg.yf_retry_delay > 0:
+                # ONE retry after a short pause (transient Yahoo 429s) -
+                # same policy as the live scanner's _YfGate
+                time.sleep(cfg.yf_retry_delay)
+                pacer.wait()
+                bars = _fetch_yfinance(sym, start, end)
+            if bars is None or len(bars.get("close", [])) < cfg.min_bars:
+                errors += 1
+                print(f"  {i}/{len(symbols)} {sym:12s} FAIL "
+                      f"(yfinance: no data)", flush=True)
+                continue
             got = backtest_symbol(sym, cfg, bars, rows, args.debug_symbol)
             print(f"  {i}/{len(symbols)} {sym:12s} "
                   f"bars={len(bars['close']):4d} signals={got}", flush=True)
@@ -684,11 +664,6 @@ def main() -> int:
         xlsx = os.path.splitext(args.out)[0] + ".xlsx"
         write_excel(rows, xlsx)
 
-    if skipped_429:
-        print(f"NOTE: {skipped_429} symbols used the yfinance fallback "
-              f"(Dhan failed for them). Data is close enough for win-rate "
-              f"analysis; re-run later when Dhan allows to use Dhan data "
-              f"for those symbols.")
     print_summary(rows, errors, time.time() - t0, cfg)
     return 0
 
