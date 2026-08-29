@@ -61,32 +61,33 @@ Test 3: Verify Filters Applied
 
 ### Quick Backtest (1 Month)
 ```bash
-python backtest.py --source dhan --period 1m --limit 300 --min-score 70
+python backtest.py --period 1m --limit 300 --min-score 70
 ```
 
 ### Recent Performance (6 Months)
 ```bash
-python backtest.py --source dhan --period 6m --limit 500 --min-score 70
+python backtest.py --period 6m --limit 500 --min-score 70
 ```
 
 ### Annual Review (1 Year)
 ```bash
-python backtest.py --source dhan --period 1y --limit 0 --min-score 70
+python backtest.py --period 1y --limit 0 --min-score 70
 ```
 
 ### Medium-Term (2 Years)
 ```bash
-python backtest.py --source dhan --period 2y --limit 0 --min-score 70
+python backtest.py --period 2y --limit 0 --min-score 70
 ```
 
 ### Long-Term (5 Years)
 ```bash
-python backtest.py --source dhan --period 5y --limit 0 --min-score 70
+python backtest.py --period 5y --limit 0 --min-score 70
 ```
 
-### Without Dhan Token (Yahoo Finance)
+### Local Quick Run (No API Token)
 ```bash
-python backtest.py --source yfinance --period 2y --limit 100 --min-score 70
+# Data comes from Yahoo Finance - no token needed
+python backtest.py --period 2y --limit 100 --min-score 70
 ```
 
 ---
@@ -169,7 +170,7 @@ elif args.years is None and args.days is None:
 ## 🚀 Next Steps
 
 ### For Users
-1. **Run a quick backtest:** `python backtest.py --source dhan --period 1m --limit 300`
+1. **Run a quick backtest:** `python backtest.py --period 1m --limit 300`
 2. **Review results:** Open `signals_backtest.xlsx`
 3. **Compare periods:** Run 6m, 1y, 2y to check consistency
 4. **Optimize threshold:** Test different `--min-score` values (60, 70, 80)

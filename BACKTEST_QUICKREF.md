@@ -36,40 +36,41 @@ Added both missing filters to `backtest.py` (lines 242-252).
 ### Basic Usage
 ```bash
 # Quick check (1 month, 300 symbols)
-python backtest.py --source dhan --period 1m --limit 300
+python backtest.py --period 1m --limit 300
 
 # Recent performance (6 months, 500 symbols)
-python backtest.py --source dhan --period 6m --limit 500
+python backtest.py --period 6m --limit 500
 
 # Annual review (1 year, all symbols)
-python backtest.py --source dhan --period 1y --limit 0
+python backtest.py --period 1y --limit 0
 
 # Medium-term (2 years, all symbols)
-python backtest.py --source dhan --period 2y --limit 0
+python backtest.py --period 2y --limit 0
 
 # Long-term (5 years, all symbols)
-python backtest.py --source dhan --period 5y --limit 0
+python backtest.py --period 5y --limit 0
 ```
 
 ### With Custom Settings
 ```bash
 # Lower score threshold (more signals, lower quality)
-python backtest.py --source dhan --period 2y --min-score 60
+python backtest.py --period 2y --min-score 60
 
 # Higher score threshold (fewer signals, higher quality)
-python backtest.py --source dhan --period 2y --min-score 75
+python backtest.py --period 2y --min-score 75
 
 # Only large-cap stocks (≥5000 Cr market cap)
-python backtest.py --source dhan --period 2y --min-mcap 5000
+python backtest.py --period 2y --min-mcap 5000
 
 # Debug a specific symbol
-python backtest.py --source dhan --period 1y --debug-symbol RELIANCE
+python backtest.py --period 1y --debug-symbol RELIANCE
 ```
 
-### Without Dhan Token (Yahoo Finance)
+### Local Quick Run (No API Token)
 ```bash
-# Quick test with yfinance (no token needed)
-python backtest.py --source yfinance --period 2y --limit 100
+# Data comes from Yahoo Finance - no token needed, ever
+pip install yfinance
+python backtest.py --period 2y --limit 100
 ```
 
 ---
@@ -79,12 +80,12 @@ python backtest.py --source yfinance --period 2y --limit 100
 ### Workflow 1: Validate Config Changes
 ```bash
 # Before changing config
-python backtest.py --source dhan --period 6m --limit 500 --out before.csv
+python backtest.py --period 6m --limit 500 --out before.csv
 
 # Make changes to config.py
 
 # After changing config
-python backtest.py --source dhan --period 6m --limit 500 --out after.csv
+python backtest.py --period 6m --limit 500 --out after.csv
 
 # Compare before.csv and after.csv
 ```
@@ -92,14 +93,14 @@ python backtest.py --source dhan --period 6m --limit 500 --out after.csv
 ### Workflow 2: Monthly Performance Review
 ```bash
 # Run on the 1st of each month
-python backtest.py --source dhan --period 1m --limit 0 --out monthly_$(date +%Y%m).csv
+python backtest.py --period 1m --limit 0 --out monthly_$(date +%Y%m).csv
 ```
 
 ### Workflow 3: Comprehensive Analysis
 ```bash
 # Run all time periods
 for period in 1m 6m 1y 2y 5y; do
-    python backtest.py --source dhan --period $period --limit 0 \
+    python backtest.py --period $period --limit 0 \
         --out backtest_${period}.csv
 done
 
@@ -110,7 +111,7 @@ done
 ```bash
 # Test different thresholds
 for score in 60 65 70 75 80; do
-    python backtest.py --source dhan --period 2y --limit 0 \
+    python backtest.py --period 2y --limit 0 \
         --min-score $score --out backtest_score${score}.csv
 done
 
@@ -172,21 +173,21 @@ entry = NEXT day open (alert at close, enter next open)
 
 ### Problem: "Too many fetch errors"
 **Causes:**
-- Dhan token expired (24-hour validity)
-- Rate limiting (429 errors)
+- Yahoo rate limiting (429 errors)
+- Symbol delisted or renamed on Yahoo
 - Network issues
 
 **Solutions:**
-- Rotate Dhan token
+- Wait and retry (Yahoo rate limits reset quickly)
 - Reduce limit: `--limit 300`
-- Use yfinance fallback: `--source yfinance`
-- Wait and retry (rate limits reset)
+- Renamed listings: add to the `_YF_ALIASES` map in `backtest.py`
+  (e.g. `SPR_AUTO` -> `SHRIPISTON`)
 
 ### Problem: "Backtest is slow"
 **Causes:**
-- Large universe (2,145 symbols)
+- Large universe (`--limit 0` scans the full static list)
 - Long time period (5 years = 1,825 days)
-- Serial processing (to avoid rate limits)
+- Paced serial fetching (0.6s between Yahoo calls, to avoid 429s)
 
 **Solutions:**
 - Reduce limit: `--limit 500`
@@ -197,12 +198,14 @@ entry = NEXT day open (alert at close, enter next open)
 **Causes:**
 - Using old backtest.py (before fix)
 - Different config.py settings
-- Different data sources (Dhan vs yfinance)
+- Slight OHLC differences between Yahoo and Dhan daily bars
+  (the backtest uses Yahoo; the live scanner uses Dhan)
 
 **Solutions:**
 - Update to latest code (with min_price and avg_volume filters)
 - Ensure same config.py for both scanner and backtest
-- Use same data source for comparison
+- Compare on the same day (the live scanner's last bar can still be
+  forming intraday)
 
 ---
 
@@ -211,10 +214,10 @@ entry = NEXT day open (alert at close, enter next open)
 ### 1. Start Small, Scale Up
 ```bash
 # Quick test first
-python backtest.py --source dhan --period 1m --limit 100
+python backtest.py --period 1m --limit 100
 
 # If it works, scale up
-python backtest.py --source dhan --period 2y --limit 0
+python backtest.py --period 2y --limit 0
 ```
 
 ### 2. Use Incremental Periods

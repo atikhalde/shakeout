@@ -348,14 +348,15 @@ Every Telegram alert now shows **what the score rewards**:
 Reversal bounce 10/20 · Candle body 7/15 · Trend (EMA20/50) 5/5`
 
 
-## 📊 Backtest (run it yourself on Dhan history)
+## 📊 Backtest (run it yourself on Yahoo Finance history)
 
-`backtest.py` replays the exact scanner logic over **real Dhan historical
-data** and measures what happened AFTER each signal (entry = next day open):
+`backtest.py` replays the exact scanner logic over **real historical data
+from Yahoo Finance** (no API token needed) and measures what happened AFTER
+each signal (entry = next day open):
 
 ```bash
-# locally (needs DHAN_ACCESS_TOKEN / DHAN_CLIENT_ID in .env or env):
-python backtest.py --source dhan --years 2 --limit 500 --min-score 55
+# locally (just `pip install yfinance` - no token needed):
+python backtest.py --years 2 --limit 500 --min-score 55
 
 # or in the cloud: repo -> Actions -> "Backtest" -> Run workflow
 #   (years / limit / min_score are inputs; CSV is uploaded as an artifact)
@@ -384,17 +385,17 @@ reports near-misses (setups that matched but scored 55–69) so quiet days are
 explainable.
 
 Tips:
-- Start with `--limit 300` (~2 min) to see the speed, then `--limit 0`
-  for the whole ~2,145-stock universe (~5-8 min in Actions).
-- `--source yfinance` works locally without a Dhan token
-  (`pip install yfinance`) if you want a quick sanity check.
-- **Dhan → yfinance failover is INSTANT** (no retry back-off waits):
-  a rejected token (401/403) marks Dhan dead for the rest of the run, a
-  429 pauses Dhan for a few seconds while the current symbol falls back
-  immediately, and timeouts/5xx never sleep between attempts — so a
-  failing Dhan call hands the symbol to yfinance within ~a second. The
-  local bar cache (`data/cache/`) is still served first even when Dhan
-  is down.
+- Start with `--limit 300` (~2-4 min) to see the speed, then `--limit 0`
+  for the whole static universe (~230 liquid names, ~6-12 min in Actions).
+- The backtest paces its Yahoo calls (0.6s apart) so the runner IP does
+  not get 429-rate-limited; expect roughly a second per symbol.
+- **Live scanner only:** Dhan → yfinance failover is INSTANT (no retry
+  back-off waits): a rejected token (401/403) marks Dhan dead for the
+  rest of the run, a 429 pauses Dhan for a few seconds while the current
+  symbol falls back immediately, and timeouts/5xx never sleep between
+  attempts — so a failing Dhan call hands the symbol to yfinance within
+  ~a second. The local bar cache (`data/cache/`) is still served first
+  even when Dhan is down.
 
 
 ## 🎯 Trade manager (implemented after live validation)
