@@ -22,9 +22,16 @@ Usage:
     # Dhan API (default - uses DHAN_ACCESS_TOKEN / DHAN_CLIENT_ID env vars):
     python backtest.py --source dhan --years 2 --limit 500 --min-score 55
 
+    # Time period presets (1 month, 6 months, 1 year, 2 years, 5 years):
+    python backtest.py --source dhan --period 1m --limit 300
+    python backtest.py --source dhan --period 6m --limit 300
+    python backtest.py --source dhan --period 1y --limit 500
+    python backtest.py --source dhan --period 2y --limit 500
+    python backtest.py --source dhan --period 5y --limit 0
+
     # Yahoo Finance (local quick run, no token needed):
     pip install yfinance
-    python backtest.py --source yfinance --years 2 --limit 100
+    python backtest.py --source yfinance --period 2y --limit 100
 
 Output: signals_backtest.csv + signals_backtest.xlsx (Excel with a
         'Signals' sheet containing EVERY signal incl. full score component
@@ -237,6 +244,19 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         if not ok:
             if debug_symbol and sym == debug_symbol:
                 print(f"    [{dates[t]}] prefilter REJECT: {why}")
+            continue
+
+        # ------------------- filters (same as live) -------------------
+        # min_price: reject penny stocks
+        if c[t] < cfg.min_price:
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] price {c[t]:.1f} < {cfg.min_price}")
+            continue
+        # avg_volume: reject illiquid stocks
+        from indicators import avg_volume as _avg_volume
+        if _avg_volume(v, cfg.volume_lookback) < cfg.min_avg_volume:
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] avg_volume < {cfg.min_avg_volume}")
             continue
 
         # --------------------- score (same formula) --------------------
@@ -456,7 +476,13 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", choices=["dhan", "yfinance"], default="dhan")
     ap.add_argument("--symbols-file", default=None)
-    ap.add_argument("--years", type=int, default=5)
+    ap.add_argument("--years", type=int, default=None,
+                    help="years of history (overridden by --period)")
+    ap.add_argument("--period", choices=["1m", "6m", "1y", "2y", "5y"],
+                    default=None,
+                    help="preset time period: 1m (1 month), 6m (6 months), "
+                         "1y (1 year), 2y (2 years), 5y (5 years). "
+                         "Overrides --years and --days.")
     ap.add_argument("--min-score", type=float, default=None)
     ap.add_argument("--out", default="signals_backtest.csv")
     ap.add_argument("--limit", type=int, default=0,
@@ -476,12 +502,29 @@ def main() -> int:
                     help="print WHY this symbol's candidate days are "
                          "rejected (e.g. --debug-symbol SPORTKING)")
     ap.add_argument("--days", type=int, default=None,
-                    help="override: fetch N calendar days of history")
+                    help="override: fetch N calendar days of history "
+                         "(overridden by --period)")
     args = ap.parse_args()
 
     cfg = ScanConfig()
     if args.min_score is not None:
         cfg.score_threshold = args.min_score
+
+    # ---- period presets override --years and --days ----
+    if args.period:
+        period_days = {
+            "1m": 30,
+            "6m": 180,
+            "1y": 365,
+            "2y": 730,
+            "5y": 1825,
+        }
+        args.days = period_days[args.period]
+        args.years = None  # not used when --days is set
+        print(f"period preset: {args.period} = {args.days} days")
+    elif args.years is None and args.days is None:
+        # default to 5 years if neither --period, --years, nor --days given
+        args.years = 5
 
     if args.symbols_file:
         with open(args.symbols_file) as f:
@@ -524,11 +567,12 @@ def main() -> int:
     # whole cache was populated - every symbol was skipped).
     if args.limit:
         symbols = symbols[:args.limit]
-    print(f"source={args.source} universe={len(symbols)} symbols, "
-          f"{args.years}y window, min_score={cfg.score_threshold}")
+    period_info = f", period={args.period}" if args.period else ""
+    print(f"source={args.source} universe={len(symbols)} symbols{period_info}, "
+          f"{args.years or (args.days/365):.1f}y window, min_score={cfg.score_threshold}")
 
     end = dt.date.today()
-    start = end - dt.timedelta(days=args.days or (365 * args.years + 30))
+    start = end - dt.timedelta(days=args.days if args.days else (365 * args.years + 30))
 
     rows: list[dict] = []
     errors = 0
