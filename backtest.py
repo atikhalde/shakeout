@@ -53,6 +53,7 @@ import numpy as np
 
 from config import ScanConfig
 from dhan_client import DhanClient, _iso_date
+from indicators import avg_volume
 from pattern import _score
 from prefilter import passes_prefilter
 
@@ -253,10 +254,17 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
                 print(f"    [{dates[t]}] price {c[t]:.1f} < {cfg.min_price}")
             continue
         # avg_volume: reject illiquid stocks
-        from indicators import avg_volume as _avg_volume
-        if _avg_volume(v, cfg.volume_lookback) < cfg.min_avg_volume:
+        # CRITICAL: slice to day t (v[:t+1]) like the prefilter above -
+        # the live scanner's volume array ENDS at the signal day, so the
+        # 20-day average must too. Using the full series `v` is look-ahead
+        # bias: future volume leaks into historical signals (an illiquid
+        # stock passes because it became liquid later, and a valid signal
+        # is rejected when the stock's volume dries up AFTER day t).
+        avg_vol = avg_volume(v[:t + 1], cfg.volume_lookback)
+        if avg_vol < cfg.min_avg_volume:
             if dbg and dates[t] >= "2026-07-20":
-                print(f"    [{dates[t]}] avg_volume < {cfg.min_avg_volume}")
+                print(f"    [{dates[t]}] avg_volume {avg_vol:,.0f} < "
+                      f"{cfg.min_avg_volume:,.0f}")
             continue
 
         # --------------------- score (same formula) --------------------
