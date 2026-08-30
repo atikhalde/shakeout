@@ -262,6 +262,38 @@ class _YfGate:
         return result
 
 
+def _iso_date(ts) -> str:
+    """Normalize any bar timestamp (epoch s/ms, datetime, or ISO string)
+    to YYYY-MM-DD. Local copy so live mode stays Dhan-free (the yfinance
+    fetchers already return ISO strings; this is belt-and-braces for any
+    future source). Same semantics as dhan_client._iso_date."""
+    s = str(ts)
+    if s.isdigit():
+        v = int(s)
+        if v > 1e12:
+            v //= 1000          # milliseconds -> seconds
+        if v > 1e10:
+            v //= 1000
+        try:
+            return (dt.datetime.fromtimestamp(v, dt.timezone.utc)
+                    .strftime("%Y-%m-%d"))
+        except (ValueError, OSError, OverflowError):
+            return s[:10]
+    return s[:10]
+
+
+class _TrackerYfClient:
+    """update_open() expects a client with get_daily(sym, from, to).
+    Post-#15 the live scan is Dhan-free, so back the tracker with the
+    same paced yfinance fetch instead of the old Dhan client."""
+
+    def __init__(self, gate: "_YfGate"):
+        self._gate = gate
+
+    def get_daily(self, sym, from_date, to_date):
+        return self._gate.call(_yf_daily, sym, from_date, to_date)
+
+
 def merge_partial(bars: dict, partial: dict, today: str):
     """
     Append a partial (intraday-so-far) candle to a daily bars dict.
@@ -446,7 +478,11 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         # ---- 1) yfinance daily bars (paced) ----
         bars = yf_gate.call(_yf_daily, sym, from_date, to_date)
         if bars is None:
-            return None, "", False, None
+            # A failed fetch MUST be counted as an error: the outage
+            # detector compares errors/total, and the 2026-08-28 lesson is
+            # that a blind scanner must never look like a healthy quiet
+            # day (0 errors, "no signals today").
+            return None, "NODATA: no bars from yfinance", False, None
 
         # ---- normalize dates to ISO (epoch-safe, cache-safe) ----
         bars["dates"] = [_iso_date(d) for d in bars["dates"]]
@@ -647,7 +683,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     if cfg.tracker_enabled:
         added = sum(1 for s in signals if log_signal(s, cfg.tracker_file))
         try:
-            updated = update_open(cfg.tracker_file, client)
+            updated = update_open(cfg.tracker_file, _TrackerYfClient(yf_gate))
         except Exception as e:  # noqa: BLE001
             updated = 0
             print(f"WARNING: tracker update failed: {e}", file=sys.stderr)
