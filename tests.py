@@ -880,7 +880,7 @@ def test_backtest_period_presets_fetch_lookahead() -> None:
 
     calls = []
 
-    def fake_fetch(sym, start, end):
+    def fake_fetch(sym, start, end, **_k):
         calls.append((sym, start, end))
         return good
 
@@ -996,7 +996,7 @@ def test_backtest_data_outage_loud_exit() -> None:
     good = {k: v for k, v in _bars.items() if k != "symbol"}
     good["dates"] = list(_dates)
 
-    def flaky_fetch(sym, start, end):
+    def flaky_fetch(sym, start, end, **_k):
         return None if sym == "RELIANCE" else good
 
     out = io.StringIO()
@@ -1011,6 +1011,65 @@ def test_backtest_data_outage_loud_exit() -> None:
           rc == 0, f"rc={rc}")
     check("partial run did NOT abort early", "aborting early"
           not in out.getvalue(), out.getvalue()[-200:])
+
+
+def test_backtest_yfinance_disk_cache() -> None:
+    """Regression (2026-08-30 log): the Actions cache restored data/cache
+    but the Yahoo-only backtest never read or wrote it, so every run
+    re-downloaded the universe. Hits on a covering CSV must skip Yahoo."""
+    print("== backtest yfinance disk cache is actually used ==")
+    import datetime as dt
+    import os
+    import tempfile
+    import unittest.mock as mock
+    import numpy as np
+    import backtest as bt
+    from demo_data import demo_universe
+
+    _dates, _bars, _ = demo_universe()["SPORTKING"]
+    tmp = tempfile.mkdtemp()
+    orig = bt.CACHE_DIR
+    bt.CACHE_DIR = tmp
+    try:
+        bars = {k: np.asarray(v, float) for k, v in _bars.items()
+                if k != "symbol"}
+        bars["dates"] = list(_dates)
+        bt._write_bar_cache("SPORTKING", bars)
+        called = {"n": 0}
+
+        class BoomTicker:
+            def __init__(self, *a, **k):
+                called["n"] += 1
+                raise AssertionError("yahoo must not be called on a cache hit")
+
+        with mock.patch("yfinance.Ticker", BoomTicker):
+            got = bt._fetch_yfinance(
+                "SPORTKING",
+                dt.date.fromisoformat(_dates[0]),
+                dt.date.fromisoformat(_dates[-1]),
+                use_cache=True)
+        check("cache hit returns bars without calling Yahoo",
+              got is not None and called["n"] == 0
+              and len(got["close"]) == len(_dates),
+              f"n={called['n']} bars={None if got is None else len(got['close'])}")
+
+        class EmptyTicker:
+            def __init__(self, *a, **k):
+                called["n"] += 1
+            def history(self, **k):
+                import pandas as pd
+                return pd.DataFrame()
+
+        with mock.patch("yfinance.Ticker", EmptyTicker):
+            miss = bt._fetch_yfinance(
+                "SPORTKING",
+                dt.date.fromisoformat(_dates[0]),
+                dt.date.fromisoformat(_dates[-1]),
+                use_cache=False)
+        check("--no-cache does not serve the disk file (forces Yahoo)",
+              miss is None and called["n"] == 1, f"n={called['n']}")
+    finally:
+        bt.CACHE_DIR = orig
 
 
 def test_tracker() -> None:
@@ -1324,6 +1383,7 @@ def main() -> int:
     test_backtest_period_presets_fetch_lookahead()
     test_backtest_symbol_since_window()
     test_backtest_data_outage_loud_exit()
+    test_backtest_yfinance_disk_cache()
     test_tracker()
     test_run_live_unpack()
     test_cross_run_cooldown_and_summary()
