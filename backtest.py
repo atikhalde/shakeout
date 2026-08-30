@@ -1,7 +1,28 @@
 #!/usr/bin/env python3
 """
-Backtest the shakeout scanner on REAL historical data from Yahoo Finance
-(no API token needed - runs locally and inside GitHub Actions).
+Backtest the shakeout scanner on the SAME data the live scanner uses:
+Dhan historical daily bars (primary), with the paced yfinance fallback the
+scanner also uses when Dhan fails (dead 24h token / 429 / unreachable).
+
+DATA PARITY WITH THE SCANNER (the 2026-08-30 fix):
+  * data source .... Dhan API first (DHAN_ACCESS_TOKEN / DHAN_CLIENT_ID),
+                     yfinance fallback per symbol - the exact chain in
+                     scanner.run_live(). Yahoo-only runs were showing
+                     DIFFERENT signals than the scanner because Yahoo bars
+                     (different corporate-action adjustments) and a static
+                     230-symbol universe were never what the scanner scans.
+  * universe ....... the scanner's own: Dhan instrument map ->
+                     liquid_universe() -> market-cap filter (>= 1000 Cr).
+                     Use --symbols-file to scan a watchlist instead.
+  * pattern ........ pattern.detect_setup() - the scanner's detector - is
+                     called as the AUTHORITATIVE check for every candidate
+                     day, so the backtest can never drift from the scanner's
+                     signal dates/scores. (A vectorized screen keeps the
+                     full-universe sweep fast; detect_setup confirms and
+                     produces the final row.)
+  * caches ......... strictly separated per source (data/cache/dhan and
+                     data/cache/yf) - the old code wrote Yahoo bars into the
+                     scanner's Dhan cache directory and polluted it.
 
 For every trading day in the window it runs the SAME logic as the live
 scanner (BOS -> flush -> SSL hold -> reversal, + 26W-high proximity guard,
@@ -19,7 +40,9 @@ scanner (BOS -> flush -> SSL hold -> reversal, + 26W-high proximity guard,
     fire on the highest-quality setups.
 
 Usage:
-    pip install yfinance
+    pip install numpy requests yfinance openpyxl
+    export DHAN_ACCESS_TOKEN=...      # same token the scanner uses
+    export DHAN_CLIENT_ID=...         # optional
 
     # Time period presets (1 month, 6 months, 1 year, 2 years, 5 years):
     python backtest.py --period 1m --limit 300
@@ -31,19 +54,27 @@ Usage:
     # or an explicit window / score threshold:
     python backtest.py --years 2 --limit 500 --min-score 55
 
+    # Yahoo-only mode (no token; different data - NOT scanner-parity):
+    python backtest.py --source yfinance --years 2 --limit 200
+
     A period/year window is the ANALYSIS window (signals are only reported
     inside it). The pattern's own lookback (min_bars ~ 26 weeks) is fetched
     automatically on top of it, so short presets like --period 1m still
     have the full BOS/SSL history behind every reportable day.
 
+    Without a Dhan token the run degrades to the yfinance fallback only,
+    exactly like the live scanner (and prints that warning).
+
 Output: signals_backtest.csv + signals_backtest.xlsx (Excel with a
         'Signals' sheet containing EVERY signal incl. full score component
-        breakdown, and a 'Summary' sheet with win-rate stats + score buckets) and a
-        printed win-rate summary, including a score>=70 vs score<70 split.
+        breakdown, a 'Summary' sheet with win-rate stats + score buckets
+        and a 'FetchReport' sheet with the data source used per symbol) and
+        a printed win-rate summary, including a score>=70 vs score<70 split.
 
-If most symbols fail to fetch (Yahoo rate-limiting the runner IP), the run
-is a DATA OUTAGE: the summary says so loudly and the process exits non-zero
-so a CI run turns RED instead of a green, meaningless "0 signals".
+If most symbols fail to fetch (Dhan dead AND the yfinance fallback
+rate-limited/unreachable), the run is a DATA OUTAGE: the summary says so
+loudly and the process exits non-zero so a CI run turns RED instead of a
+green, meaningless "0 signals".
 """
 
 from __future__ import annotations
@@ -59,8 +90,9 @@ import time
 import numpy as np
 
 from config import ScanConfig
+from env_loader import load_env
 from indicators import avg_volume
-from pattern import _score
+from pattern import _prev_highs, detect_setup
 from prefilter import passes_prefilter
 
 # exit code when a run was a data outage (same convention as scanner.py:
@@ -69,8 +101,14 @@ from prefilter import passes_prefilter
 EXIT_DATA_OUTAGE = 3
 
 # ---------------------------------------------------------------------------
-# universe (static list of liquid NSE names - the backtest no longer calls
-# the Dhan API, so the scrip-master universe is not available here)
+# universe
+# ---------------------------------------------------------------------------
+# With --source dhan (the default, and what the scanner uses) the universe
+# comes from the Dhan instrument map -> liquid_universe() -> market-cap
+# filter, exactly like scanner.run_live(). This static list is only a
+# fallback: --source yfinance mode (Yahoo only, no instrument map), and the
+# last-resort layer when the Dhan scrip master cannot be loaded (which also
+# falls back through universes.get_universe() first).
 # ---------------------------------------------------------------------------
 UNIVERSE = [
     "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "SBIN", "BHARTIARTL",
@@ -113,7 +151,7 @@ UNIVERSE = [
 
 
 # ---------------------------------------------------------------------------
-# data: Yahoo Finance (the only source)
+# data: Dhan (primary, same as the scanner) + Yahoo Finance (fallback)
 # ---------------------------------------------------------------------------
 # NSE symbol -> Yahoo symbol (renamed listings)
 _YF_ALIASES = {"SPR_AUTO": "SHRIPISTON"}
@@ -131,7 +169,17 @@ SIGNAL_FIELDS = [
 ]
 
 
-CACHE_DIR = os.path.join("data", "cache")
+# Cache directories are STRICTLY separated per data source.
+#   data/cache/dhan/  - Dhan daily bars fetched by the backtest's DhanClient.
+#                       (Never mixed with the scanner's own data/cache root,
+#                       and never written by the Yahoo path - the old code
+#                       wrote Yahoo bars into data/cache/ where the scanner's
+#                       Dhan client reads its cache, silently swapping the
+#                       scanner's Dhan data for Yahoo data.)
+#   data/cache/yf/    - yfinance fallback bars.
+# Both live under data/cache so the GitHub Actions cache restore covers them.
+DHAN_CACHE_DIR = os.path.join("data", "cache", "dhan")
+CACHE_DIR = os.path.join("data", "cache", "yf")
 
 
 def _cache_path(sym: str) -> str:
@@ -203,7 +251,7 @@ def _fetch_yfinance(sym: str, start: dt.date, end: dt.date,
     fix the live scanner's _yf_daily applies) - otherwise the newest bar
     is silently dropped.
 
-    When `use_cache` is True, a CSV under data/cache/<SYM>.csv is reused
+    When `use_cache` is True, a CSV under data/cache/yf/<SYM>.csv is reused
     if it already covers `end` (the GitHub Actions cache step restores
     this directory). Without a disk cache every CI run re-downloads the
     whole universe and Yahoo 429s the runner IP.
@@ -261,24 +309,26 @@ class _Pacer:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+# NOTE: there is deliberately NO local "prev max" helper any more. The
+# screen below uses pattern._prev_highs - the EXACT function the scanner's
+# detect_setup calls - so a window-size or edge-case change in pattern.py
+# can never silently desync the backtest from the scanner.
 
-def rolling_prev_max(a: np.ndarray, w: int) -> np.ndarray:
-    """out[i] = max(a[i-w : i]) (max of the w bars BEFORE i); NaN at start."""
-    out = np.full(len(a), np.nan)
-    if len(a) < 2:
-        return out
-    from collections import deque
-    dq: deque = deque()
-    for i in range(len(a)):
-        while dq and dq[0] <= i - w - 1:
-            dq.popleft()
-        if i >= 1:
-            while dq and a[dq[-1]] <= a[i - 1]:
-                dq.pop()
-            dq.append(i - 1)
-        if dq:
-            out[i] = a[dq[0]]
-    return out
+
+def _make_dhan_client(token: str, client_id: str | None, cfg: ScanConfig):
+    """Build the Dhan client the backtest fetches from. Uses its OWN cache
+    directory (data/cache/dhan) so backtest bars can never collide with the
+    scanner's data/cache root - and, crucially, can never be polluted by the
+    yfinance fallback cache (data/cache/yf), which is how the old Yahoo-only
+    backtest silently swapped the scanner's Dhan data for Yahoo data.
+
+    Kept as a small helper so tests can patch it."""
+    from dhan_client import DhanClient
+    return DhanClient(token, client_id,
+                      cache_dir=DHAN_CACHE_DIR,
+                      min_interval=cfg.request_interval,
+                      timeout=cfg.api_timeout)
+
 
 
 def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
@@ -297,7 +347,15 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
     `stats` (optional dict): per-stage rejection counts so the summary can
     explain WHY a run produced few/zero signals instead of staying silent
     (the 2026-08 silent "0 signals" runs had no way to tell a tight market
-    apart from a broken data path)."""
+    apart from a broken data path).
+
+    SCANNER PARITY: the cheap vectorized screen below mirrors the scanner's
+    pattern.detect_setup, and every day that passes it is CONFIRMED by
+    calling detect_setup on the bars sliced to that day - the scanner's own
+    detector produces the final signal dict (dates, levels, score parts),
+    so the backtest and the scanner share one detector implementation and
+    one scoring formula. tests.py sweeps detect_setup over the demo data to
+    prove the screen and the detector agree day-for-day."""
     o = np.asarray(bars["open"], float)
     h = np.asarray(bars["high"], float)
     l = np.asarray(bars["low"], float)
@@ -310,8 +368,10 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
             stats["too_few_bars"] = stats.get("too_few_bars", 0) + 1
         return 0
 
-    prev26 = rolling_prev_max(h, cfg.bos_lookback_26w)
-    prev45 = rolling_prev_max(h, cfg.bos_lookback_swing)
+    # the SAME previous-high arrays pattern.detect_setup uses (via
+    # pattern._prev_highs) - one window definition for both code paths
+    prev26 = _prev_highs(h, cfg.bos_lookback_26w)
+    prev45 = _prev_highs(h, cfg.bos_lookback_swing)
 
     def rej(stage: str, sub: str = "") -> None:
         if stats is None:
@@ -484,21 +544,35 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
             rej("avg_volume")
             continue
 
-        # --------------------- score (same formula) --------------------
-        sig_tmp = {
-            "days_since_bos": t - bos_day,
-            "flush_drop_pct": drop * 100.0,
-            "flush_low": flush_low,
-            "ssl": ssl,
-            "bounce_pct": (c[t] / c[t - 1] - 1) * 100.0,
-            "body_ratio": (c[t] - o[t]) / rng,
-        }
-        score, _parts = _score(sig_tmp, {"close": c[:t + 1]}, cfg)
+        # ------- AUTHORITATIVE detector: the scanner's own function -----
+        # Every day that passed the cheap screen is re-checked by
+        # pattern.detect_setup on the bars sliced to day t - the SAME
+        # detector the live scanner runs (run_live -> scan_one ->
+        # detect_setup). Its signal dict supplies the final dates, levels,
+        # score and score components, so the backtest and the scanner share
+        # one detector implementation and one scoring formula by
+        # construction - they can never drift apart again.
+        day_bars = {k: v[:t + 1] for k, v in bars.items()}
+        day_bars["symbol"] = sym
+        sig = detect_setup(day_bars, dates[:t + 1], cfg)
+        if sig is None:
+            if dbg and dates[t] >= "2026-07-20":
+                print(f"    [{dates[t]}] screen passed but detect_setup "
+                      f"rejected - screen/detector drift!")
+            rej("detector", "drift")
+            continue
+        score = sig["score"]
         if score < cfg.score_threshold:
             rej("score")
             continue
-        # flatten the score components (needed for the last-bar branch too)
-        comp = {name: round(v, 1) for name, (v, _m) in (_parts or {}).items()}
+        # authoritative values from the scanner's detector
+        bos_day = dates.index(sig["bos_date"])
+        bos_style = sig["bos_style"]
+        peak = sig["peak"]
+        flush_low = sig["flush_low"]
+        ssl = sig["ssl"]
+        comp = {name: round(v, 1)
+                for name, (v, _m) in (sig.get("score_parts") or {}).items()}
         # ------------------- forward returns (next open) ---------------
         if t + 1 >= n:
             # last bar: signal is forming today, no forward data yet
@@ -699,15 +773,15 @@ def write_excel(rows: list[dict], path: str, fetch_report: list[dict] | None = N
     # healthy bars, too-few bars, or a hard fetch error.
     if fetch_report:
         ws3 = wb.create_sheet("FetchReport")
-        hdr = ["symbol", "status", "bars", "signals", "reason"]
+        hdr = ["symbol", "status", "source", "bars", "signals", "reason"]
         ws3.append(hdr)
         for c in ws3[1]:
             c.fill = hdr_fill
             c.font = hdr_font
         for r in fetch_report:
             ws3.append([r.get("symbol", ""), r.get("status", ""),
-                        r.get("bars", 0), r.get("signals", 0),
-                        r.get("reason", "")])
+                        r.get("source", ""), r.get("bars", 0),
+                        r.get("signals", 0), r.get("reason", "")])
         ws3.freeze_panes = "A2"
         ws3.auto_filter.ref = ws3.dimensions
         for i, f in enumerate(hdr, 1):
@@ -725,16 +799,31 @@ def write_excel(rows: list[dict], path: str, fetch_report: list[dict] | None = N
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    # Keep the old workflow flags as hidden compatibility options. The
-    # backtest was refactored to Yahoo-only, but an already-published GitHub
-    # Actions workflow may still pass these flags while it is being updated.
-    # Accepting and ignoring them prevents an argparse failure from stopping
-    # the run; no Dhan or daily-bar cache is used by this implementation.
+    # --source: the data chain. Default is dhan = the SAME chain the live
+    # scanner uses (Dhan API primary, paced yfinance fallback per symbol).
+    # yfinance = Yahoo-only mode (different bars than the scanner; kept for
+    # environments with no Dhan token).
     ap.add_argument("--source", choices=["dhan", "yfinance"],
-                    default="yfinance", help=argparse.SUPPRESS)
-    ap.add_argument("--no-cache", action="store_true", help=argparse.SUPPRESS)
+                    default="dhan",
+                    help="data source: dhan = Dhan API + yfinance fallback "
+                         "(scanner parity, default); yfinance = Yahoo only")
+    ap.add_argument("--token", default=None,
+                    help="Dhan access token (or set DHAN_ACCESS_TOKEN)")
+    ap.add_argument("--client-id", default=None,
+                    help="Dhan client id (or set DHAN_CLIENT_ID)")
+    ap.add_argument("--yf-failover", dest="yf_failover",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="fall back to yfinance per symbol when Dhan fails "
+                         "(default: on, same as the scanner; "
+                         "--no-yf-failover to count Dhan failures as errors)")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore the disk caches (Dhan daily bars + yf) "
+                         "and refetch everything")
     ap.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)
-    ap.add_argument("--symbols-file", default=None)
+    ap.add_argument("--symbols-file", default=None,
+                    help="scan only the symbols in this file "
+                         "(one per line, # comments) instead of the "
+                         "scanner's liquid universe")
     ap.add_argument("--years", type=int, default=None,
                     help="years of history to REPORT signals from "
                          "(lookback is fetched on top; overridden by --period)")
@@ -747,10 +836,10 @@ def main() -> int:
     ap.add_argument("--out", default="signals_backtest.csv")
     ap.add_argument("--limit", type=int, default=0,
                     help="scan only the first N symbols (0 = all)")
-    ap.add_argument("--min-mcap", type=float, default=1000,
+    ap.add_argument("--min-mcap", type=float, default=None,
                     help="only backtest symbols with market cap >= this many "
-                         "crores (uses data/market_cap.csv; 1000 = liquid "
-                         "stocks only - matches what the live scanner trades)")
+                         "crores (uses data/market_cap.csv; default = "
+                         "prefilter_mcap_min from config, the scanner's rule)")
     ap.add_argument("--debug-symbol", default=None,
                     help="print WHY this symbol's candidate days are "
                          "rejected (e.g. --debug-symbol SPORTKING)")
@@ -760,13 +849,11 @@ def main() -> int:
                          "overridden by --period)")
     args = ap.parse_args()
 
-    if args.source == "dhan":
-        print("NOTICE: --source dhan is deprecated; this backtest uses "
-              "Yahoo Finance only.")
     if args.resume:
-        print("NOTICE: --resume is deprecated; the daily-bar cache is "
-              "always reused when present.")
+        print("NOTICE: --resume is deprecated; the daily-bar caches are "
+              "always reused when present (--no-cache to force a refetch).")
     use_cache = not args.no_cache
+    load_env()          # .env may carry DHAN_ACCESS_TOKEN / DHAN_CLIENT_ID
 
     cfg = ScanConfig()
     if args.min_score is not None:
@@ -788,20 +875,64 @@ def main() -> int:
         # default to 5 years if neither --period, --years, nor --days given
         args.years = 5
 
+    # ---------------------------------------------------------------- data
+    # The SAME data chain as the live scanner (scanner.run_live): a Dhan
+    # client for historical daily bars, with the paced yfinance fallback
+    # for symbols Dhan cannot serve (dead 24h token / 429 / delisted).
+    client = None
+    dhan_auth_warned = [False]
+    if args.source == "dhan":
+        token = args.token or os.environ.get("DHAN_ACCESS_TOKEN") or ""
+        client_id = args.client_id or os.environ.get("DHAN_CLIENT_ID")
+        client = _make_dhan_client(token, client_id, cfg)
+        if not token:
+            print("WARNING: no DHAN_ACCESS_TOKEN (--token / env) - Dhan "
+                  "data unavailable, every symbol will use the yfinance "
+                  "fallback. The scanner needs the same token; see "
+                  ".env.example.", file=sys.stderr)
+
+    # ------------------------------------------------------------ universe
+    # The SAME universe pipeline as the live scanner: Dhan instrument map ->
+    # liquid universe -> market-cap filter. --symbols-file overrides it.
+    symbols: list[str] = []
+    universe_source = ""
     if args.symbols_file:
         with open(args.symbols_file) as f:
             symbols = [ln.strip().upper() for ln in f
                        if ln.strip() and not ln.strip().startswith("#")]
+        universe_source = f"symbols-file ({len(symbols)} syms)"
+    elif client is not None:
+        try:
+            instruments = client.get_instruments()
+            print(f"instrument map: {len(instruments)} NSE equities")
+        except Exception as e:  # noqa: BLE001
+            instruments = {}
+            print(f"WARNING: instrument map unavailable ({e}); "
+                  f"falling back to static list", file=sys.stderr)
+        if instruments:
+            symbols = client.liquid_universe() or sorted(instruments.keys())
+            universe_source = f"dhan-liquid-universe ({len(symbols)} syms)"
+        else:
+            from universes import get_universe
+            symbols, universe_source = get_universe()
     else:
         symbols = list(UNIVERSE)
-    if args.min_mcap:
+        universe_source = f"static-universe ({len(symbols)} syms, " \
+                          f"yfinance mode)"
+    print(f"universe: {universe_source}")
+
+    # market-cap filter - the scanner's prefilter mcap rule
+    mcap_min = args.min_mcap
+    if mcap_min is None:
+        mcap_min = cfg.prefilter_mcap_min if cfg.prefilter_enabled else 0.0
+    if mcap_min and mcap_min > 0:
         from prefilter import load_mcap, mcap_filter
         mcap = load_mcap(cfg.mcap_file)
         if mcap:
             before = len(symbols)
-            symbols, _dropped = mcap_filter(symbols, mcap, args.min_mcap)
+            symbols, _dropped = mcap_filter(symbols, mcap, mcap_min)
             print(f"mcap filter: {before} -> {len(symbols)} symbols "
-                  f"(>= {args.min_mcap:.0f} Cr)")
+                  f"(>= {mcap_min:.0f} Cr, the scanner's rule)")
         else:
             print(f"WARNING: {cfg.mcap_file} not found - min-mcap skipped")
     if args.limit:
@@ -823,9 +954,10 @@ def main() -> int:
     since_iso = since_date.isoformat()
     fetch_start = since_date - dt.timedelta(days=lookback_days)
 
-    print(f"source=yfinance universe={len(symbols)} symbols{period_info}, "
-          f"{analysis_days / 365:.1f}y window (+{lookback_days}d lookback "
-          f"fetched), min_score={cfg.score_threshold}")
+    print(f"source={args.source} universe={len(symbols)} symbols"
+          f"{period_info}, {analysis_days / 365:.1f}y window "
+          f"(+{lookback_days}d lookback fetched), "
+          f"min_score={cfg.score_threshold}")
 
     rows: list[dict] = []
     errors = 0
@@ -836,45 +968,96 @@ def main() -> int:
     stats: dict = {}
     bar_counts: list[int] = []
     fetched_ok = 0
+    by_source: dict[str, int] = {}
     # per-symbol data health -> written to the FetchReport sheet of the
     # xlsx so every run leaves a diagnosable artifact, even 0-signal runs
     fetch_report: list[dict] = []
 
     pacer = _Pacer(cfg.yf_min_interval)
+    from dhan_client import DhanAuthError
     for i, sym in enumerate(symbols, 1):
         attempted = i
         rec = {"symbol": sym, "status": "error", "bars": 0,
-               "signals": 0, "reason": ""}
+               "signals": 0, "reason": "", "source": ""}
         fetch_report.append(rec)
         try:
-            pacer.wait()
-            bars = _fetch_yfinance(sym, fetch_start, end, use_cache=use_cache)
-            if (bars is None or len(bars.get("close", [])) < cfg.min_bars) \
-                    and cfg.yf_retry_delay > 0:
-                # ONE retry after a short pause (transient Yahoo 429s) -
-                # same policy as the live scanner's _YfGate
-                time.sleep(cfg.yf_retry_delay)
+            # ---- 1) Dhan primary (the scanner's data source) ------------
+            bars = None
+            src = ""
+            if client is not None:
+                try:
+                    bars = client.get_daily(sym, fetch_start, end,
+                                            force_refresh=not use_cache)
+                    if bars is not None:
+                        # numeric-ify the OHLCV columns; keep the string
+                        # columns (dates, symbol) untouched - converting
+                        # 'symbol' with asarray(..., float) would raise
+                        # and (before the fix) leave a half-initialized
+                        # `bars` that skipped the fallback with no source
+                        # label at all.
+                        bars = {k: (np.asarray(v, float)
+                                    if k not in ("dates", "symbol") else v)
+                                for k, v in bars.items()}
+                    if bars is not None and \
+                            len(bars.get("close", [])) >= cfg.min_bars:
+                        src = "dhan"
+                    else:
+                        bars = None
+                except DhanAuthError:
+                    bars = None
+                    # dead/expired token: every Dhan call now fails
+                    # instantly; the rest of the run rides the yfinance
+                    # fallback (same policy as the live scanner)
+                    if not dhan_auth_warned[0]:
+                        dhan_auth_warned[0] = True
+                        print("WARNING: Dhan rejected the access token "
+                              "(401/403) - continuing on the yfinance "
+                              "fallback only. DhanHQ tokens are valid ~24 "
+                              "hours: rotate DHAN_ACCESS_TOKEN to restore "
+                              "Dhan data.", file=sys.stderr)
+                except Exception as e:  # noqa: BLE001
+                    bars = None
+                    if args.debug_symbol == sym:
+                        print(f"    [{sym}] dhan error: {str(e)[:80]}")
+            # ---- 2) yfinance fallback (paced, same as the scanner) ------
+            if bars is None and args.yf_failover:
                 pacer.wait()
-                bars = _fetch_yfinance(sym, fetch_start, end, use_cache=use_cache)
-            if bars is None or len(bars.get("close", [])) < cfg.min_bars:
+                bars = _fetch_yfinance(sym, fetch_start, end,
+                                       use_cache=use_cache)
+                if (bars is None or len(bars.get("close", [])) < cfg.min_bars) \
+                        and cfg.yf_retry_delay > 0:
+                    # ONE retry after a short pause (transient Yahoo 429s) -
+                    # same policy as the live scanner's _YfGate
+                    time.sleep(cfg.yf_retry_delay)
+                    pacer.wait()
+                    bars = _fetch_yfinance(sym, fetch_start, end,
+                                           use_cache=use_cache)
+                if bars is not None and \
+                        len(bars.get("close", [])) >= cfg.min_bars:
+                    src = "yfinance"
+                else:
+                    bars = None
+            if bars is None:
                 errors += 1
-                nbars = 0 if bars is None else len(bars.get("close", []))
                 rec["status"] = "fail"
-                rec["reason"] = ("no data" if bars is None
-                                 else f"only {nbars} bars (< min_bars={cfg.min_bars})")
+                rec["reason"] = ("no data (dhan+yfinance both failed)"
+                                 if client is not None
+                                 else "no data (yfinance failed)")
                 print(f"  {i}/{len(symbols)} {sym:12s} FAIL "
-                      f"(yfinance: {rec['reason']})", flush=True)
+                      f"({rec['reason']})", flush=True)
             else:
                 fetched_ok += 1
+                by_source[src] = by_source.get(src, 0) + 1
                 bar_counts.append(len(bars["close"]))
                 rec["bars"] = len(bars["close"])
                 rec["status"] = "ok"
+                rec["source"] = src
                 got = backtest_symbol(sym, cfg, bars, rows, args.debug_symbol,
                                       since=since_iso, stats=stats)
                 rec["signals"] = got
                 print(f"  {i}/{len(symbols)} {sym:12s} "
-                      f"bars={len(bars['close']):4d} signals={got}",
-                      flush=True)
+                      f"bars={len(bars['close']):4d} signals={got} "
+                      f"[{src}]", flush=True)
         except Exception as e:  # noqa: BLE001
             errors += 1
             rec["status"] = "error"
@@ -882,10 +1065,11 @@ def main() -> int:
             print(f"  {i}/{len(symbols)} {sym:12s} ERROR {str(e)[:70]}",
                   flush=True)
         # ---- fail fast on a dead data source: if the FIRST
-        #      data_outage_min_symbols symbols ALL failed to fetch, Yahoo is
-        #      not answering this runner - grinding through the rest (2
-        #      paced calls each) only burns 5-10 minutes to reach the same
-        #      outage verdict. Abort now and fail the run loudly.
+        #      data_outage_min_symbols symbols ALL failed to fetch, both
+        #      Dhan and the yfinance fallback are not answering this runner
+        #      - grinding through the rest (2 paced calls each) only burns
+        #      5-10 minutes to reach the same outage verdict. Abort now
+        #      and fail the run loudly.
         if attempted >= cfg.data_outage_min_symbols and errors == attempted:
             aborted_outage = True
             print(f"  fetch dead for all {attempted} symbols so far - "
@@ -894,7 +1078,7 @@ def main() -> int:
             for sym_skip in symbols[attempted:]:
                 fetch_report.append(
                     {"symbol": sym_skip, "status": "skipped",
-                     "bars": 0, "signals": 0,
+                     "bars": 0, "signals": 0, "source": "",
                      "reason": "aborted early (source dead)"})
             break
 
@@ -958,19 +1142,22 @@ def main() -> int:
         fetch = f"fetched=0/{total} (expected~{expected_bars})"
 
     # ---- data-health line: always printed, so the run log itself says
-    #      what the fetch delivered (the artifact's FetchReport sheet has
-    #      the same data per symbol) ----
+    #      what the fetch delivered and WHICH SOURCE carried each symbol
+    #      (the artifact's FetchReport sheet has the same data per symbol)
+    #      - scanner parity is visible at a glance: dhan=N is the count of
+    #      symbols on the scanner's own data source.
     ok_syms = sum(1 for r in fetch_report if r["status"] == "ok")
+    src_detail = " | ".join(f"{k}={v}" for k, v in sorted(by_source.items()))
     print(f"data health: ok={ok_syms}/{total}, fail={errors}, "
-          f"signals={len(rows)} | {fetch}")
+          f"signals={len(rows)} | {fetch} | source[{src_detail}]")
 
     # ---- ZERO-REPORTABLE-DAY class: every symbol fetched >= min_bars but
     #      produced no candidate day inside the analysis window. With a
     #      healthy >= 90-day window across a liquid universe this is
     #      structurally impossible - it means the delivered bars fall
-    #      (almost) entirely in the lookback buffer (e.g. Yahoo returned
-    #      only ~5-8 months of data on a 5y request). That is a silent
-    #      data problem, not a quiet market -> treat as an outage.
+    #      (almost) entirely in the lookback buffer (e.g. the source
+    #      returned only ~5-8 months of data on a 5y request). That is a
+    #      silent data problem, not a quiet market -> treat as an outage.
     blind = (not outage and analysis_days >= 90
              and ok_syms >= cfg.data_outage_min_symbols
              and stats.get("candidates", 0) == 0)
@@ -978,7 +1165,7 @@ def main() -> int:
         outage = True
 
     # ---- PARTIAL-DATA class: half the universe fetched well under the
-    #      expected bar count (truncated-but-valid Yahoo payloads). The
+    #      expected bar count (truncated-but-valid payloads). The
     #      run may still emit a few signals, but the result is biased --
     #      make it loud and RED when >= half the symbol set is truncated.
     #      Gated on long fetch windows (>= 1000 expected bars, i.e. ~5y
@@ -1005,7 +1192,8 @@ def main() -> int:
     # next run is not a blind re-run of a broken or mis-tuned pipeline.
     if stats.get("candidates"):
         groups = ("bos", "flush", "ssl", "hold", "candle", "prefilter",
-                  "min_price", "avg_volume", "score", "too_few_bars")
+                  "min_price", "avg_volume", "score", "detector",
+                  "too_few_bars")
         top = sorted(((k, v) for k, v in stats.items()
                       if k in groups or k.startswith("prefilter:")),
                      key=lambda kv: -kv[1])
@@ -1018,13 +1206,14 @@ def main() -> int:
     elif not outage:
         print(f"\nREJECTION STATS: candidates=0 signals={len(rows)} | {fetch}")
 
-    # ---- DATA OUTAGE: most symbols fetched NOTHING (Yahoo unreachable /
-    #      rate-limiting this IP) or the payloads were truncated to the
-    #      point of blindness. "0 signals" in that state is a lie - the
-    #      backtest was blind. Same policy as the live scanner (see
-    #      scanner.py / the 2026-08-24 silent-outage postmortem): a loud
-    #      ::error:: annotation for the Actions run page plus a non-zero
-    #      exit code so the run turns RED instead of a green empty result.
+    # ---- DATA OUTAGE: most symbols fetched NOTHING (Dhan dead AND the
+    #      yfinance fallback unreachable/rate-limiting this IP) or the
+    #      payloads were truncated to the point of blindness. "0 signals"
+    #      in that state is a lie - the backtest was blind. Same policy as
+    #      the live scanner (see scanner.py / the 2026-08-24 silent-outage
+    #      postmortem): a loud ::error:: annotation for the Actions run
+    #      page plus a non-zero exit code so the run turns RED instead of
+    #      a green empty result.
     if outage:
         if blind:
             reason = (f"0 reportable days for ALL {ok_syms} fetched symbols "
@@ -1033,12 +1222,17 @@ def main() -> int:
         elif truncated_outage:
             reason = (f"{len(truncated)}/{total} symbols returned < 50% of "
                       f"the expected ~{expected_bars} bars ({fetch}) - "
-                      f"Yahoo served truncated history")
+                      f"the data source served truncated history")
         else:
             pct = 100.0 * errors / max(total, 1)
+            token_hint = ""
+            if client is not None and dhan_auth_warned[0]:
+                token_hint = (" (Dhan rejected the access token - rotate "
+                              "DHAN_ACCESS_TOKEN)")
             reason = (f"{errors}/{total} symbols failed to fetch "
-                      f"({pct:.0f}%){suffix} - Yahoo Finance unreachable "
-                      f"or rate-limiting this IP")
+                      f"({pct:.0f}%){suffix} - Dhan API and the yfinance "
+                      f"fallback both unreachable/rate-limiting this IP"
+                      f"{token_hint}")
         print(f"::error title=Backtest data outage::{reason}. '0 signals' is "
               f"INVALID for this run: rotate the network/retry later.")
         print(f"ERROR: DATA OUTAGE - {reason}; results are not a real "

@@ -348,32 +348,40 @@ Every Telegram alert now shows **what the score rewards**:
 Reversal bounce 10/20 · Candle body 7/15 · Trend (EMA20/50) 5/5`
 
 
-## 📊 Backtest (run it yourself on Yahoo Finance history)
+## 📊 Backtest (same data as the scanner: Dhan primary + yfinance fallback)
 
-`backtest.py` replays the exact scanner logic over **real historical data
-from Yahoo Finance** (no API token needed) and measures what happened AFTER
-each signal (entry = next day open):
+`backtest.py` replays the scanner's logic over **the SAME data the live
+scanner uses** — Dhan historical daily bars (`DHAN_ACCESS_TOKEN`), with the
+paced yfinance fallback per symbol when Dhan fails — and measures what
+happened AFTER each signal (entry = next day open). The universe, the
+market-cap filter and the detector (`pattern.detect_setup`) are the
+scanner's own, so backtest signals line up with what the daily scan sees.
 
 ```bash
-# locally (just `pip install yfinance` - no token needed):
+# locally (same token as the scanner):
+export DHAN_ACCESS_TOKEN=...   # DhanHQ tokens are valid ~24h - rotate!
 python backtest.py --years 2 --limit 500 --min-score 55
 
+# Yahoo-only mode (no token; different bars - NOT scanner-parity):
+python backtest.py --source yfinance --years 2 --limit 200
+
 # or in the cloud: repo -> Actions -> "Backtest" -> Run workflow
-#   (years / limit / min_score are inputs; CSV is uploaded as an artifact)
+#   (years / period / limit / min_score are inputs; CSV is uploaded)
 ```
 
 Output: `signals_backtest.csv` (every signal + r3/r5/r10/r15/max15/min15
-forward returns) and a printed summary with a **score>=60/70/80 split** so
+forward returns), `signals_backtest.xlsx` (per-symbol data source in the
+FetchReport sheet) and a printed summary with a **score>=60/70/80 split** so
 you can see whether raising the threshold improves the win rate.
 
-Reference results (Yahoo data, 90 large/mid-caps, 2 years, score>=55):
+Reference results (90 large/mid-caps, 2 years, score>=55):
 ```
               3 days: win 86%  avg +1.8%
               5 days: win 71%  avg +2.0%
               7 days: win ~75% avg +2.5%   ← short-term bounce focus
      best within 15d: win 86%  avg +4.0%
   💥 BIG MOVE (≥+8% in 15d): only on the highest-score setups
-  score >= 60 -> 5-day win 83% avg +2.6%   (default threshold = 60 now)
+  score >= 60 -> 5-day win 83% avg +2.6%
 ```
 
 The default `score_threshold` is now **70** (was 55 → 60) — the backtest shows
@@ -385,17 +393,18 @@ reports near-misses (setups that matched but scored 55–69) so quiet days are
 explainable.
 
 Tips:
-- Start with `--limit 300` (~2-4 min) to see the speed, then `--limit 0`
-  for the whole static universe (~230 liquid names, ~6-12 min in Actions).
-- The backtest paces its Yahoo calls (0.6s apart) so the runner IP does
-  not get 429-rate-limited; expect roughly a second per symbol.
+- Start with `--limit 300` to see the speed, then `--limit 0` for the
+  scanner's whole liquid universe (after the 1000 Cr mcap filter).
+- Caches are separated per source (`data/cache/dhan/` and
+  `data/cache/yf/`) and restored by the Actions cache, so repeat runs are
+  fast and Yahoo bars can never masquerade as Dhan bars.
 - `--period 1m/6m/...` presets define the window signals are REPORTED
   from; the pattern's own lookback (~26 weeks) is fetched automatically
   on top, so short windows still have full BOS/SSL history behind them.
-- If (nearly) every symbol fails to fetch (Yahoo blocking the runner IP),
-  the run is a **data outage**: it aborts early, prints a `::error::`
-  annotation and exits non-zero — a red Actions run instead of a green,
-  meaningless "0 signals" (same policy as the live scanner).
+- If (nearly) every symbol fails to fetch (Dhan dead AND the yfinance
+  fallback blocked), the run is a **data outage**: it aborts early, prints
+  a `::error::` annotation and exits non-zero — a red Actions run instead
+  of a green, meaningless "0 signals" (same policy as the live scanner).
 - **Live scanner only:** Dhan → yfinance failover is INSTANT (no retry
   back-off waits): a rejected token (401/403) marks Dhan dead for the
   rest of the run, a 429 pauses Dhan for a few seconds while the current

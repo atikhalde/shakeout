@@ -216,4 +216,54 @@ The backtest now produces **identical results** to the scanner by applying all 1
 
 ---
 
+# 🆕 2026-08-30 Update: Backtest shows the SAME DATA as the scanner
+
+**Problem (from the CI backtest log + local repro):** the backtest was
+Yahoo-Finance-only. The log showed `FAIL (yfinance: no data)` for symbol
+after symbol (Yahoo rate-limits/blocks the runner IP) and ended in a DATA
+OUTAGE — and even when Yahoo did answer, the bars, universe (~230 static
+names) and detector copy differed from the scanner's Dhan data, so the
+backtest never matched what the daily scan sees. To make it worse, the
+Yahoo bars were cached into `data/cache/` — the directory the scanner's
+Dhan client reads its cache from — so the backtest could silently swap the
+scanner's Dhan data for Yahoo data.
+
+**Fixes (this update):**
+
+1. **Data parity** — `backtest.py` now uses the scanner's exact data chain:
+   Dhan historical daily bars (`DHAN_ACCESS_TOKEN`/`DHAN_CLIENT_ID`)
+   primary, paced yfinance fallback per symbol (same policy as
+   `scanner.run_live()`), including the dead-token warning.
+2. **Universe parity** — Dhan instrument map → `liquid_universe()` →
+   market-cap filter (≥ 1000 Cr), the scanner's own pipeline. Static list
+   only remains as the `--source yfinance` fallback.
+3. **Detector parity** — every candidate day that passes the fast screen
+   is confirmed by `pattern.detect_setup()` (the scanner's detector),
+   which produces the final dates/levels/score. New `tests.py` parity
+   sweep proves backtest rows == scanner detector day-by-day on all demo
+   symbols.
+4. **Cache separation** — Dhan bars go to `data/cache/dhan/`, Yahoo bars
+   to `data/cache/yf/`; they can never contaminate each other (or the
+   scanner's cache) again.
+5. **Visible sources** — every symbol line is tagged `[dhan]`/`[yfinance]`
+   and the health line reports `source[dhan=N yf=M]`; the Excel
+   FetchReport sheet has a per-symbol `source` column.
+6. **Workflow** — the published `backtest.yml` already passes
+   `--source dhan --no-cache --min-mcap ...`, which the new code honors
+   (Dhan primary + yfinance fallback). A follow-up patch wires the
+   existing `failover_yfinance` input to `--no-yf-failover` (supplied in
+   the PR — the CI bot could not update workflow files in this session).
+7. **Outage handling kept loud** — dead Dhan AND dead Yahoo still abort
+   early with a `::error::` annotation + exit code 3 (red CI run).
+
+**Test Results:** 193/193 tests passing (was 181) — including the new
+day-by-day scanner-parity sweep and the Dhan→yfinance→outage chain.
+
+**Verification:** with a mocked Dhan client serving the demo bars, the
+backtest reports the scanner's verified signals exactly — SPORTKING
+2026-07-31 score 82.1, BAJFINANCE 2026-07-27 score 87.4, SPR_AUTO
+2026-07-27 score 80.1.
+
+---
+
 **End of Summary**

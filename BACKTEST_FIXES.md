@@ -4,6 +4,14 @@
 **Issue:** Backtest logic did not match scanner logic (missing filters)  
 **Status:** ✅ Fixed and tested
 
+> **🆕 2026-08-30 update — data parity (supersedes the data-source notes
+> below):** the backtest no longer runs on Yahoo-only data. It now uses the
+> scanner's exact data chain (Dhan historical daily bars primary + paced
+> yfinance fallback), the scanner's universe (instrument map →
+> liquid universe → mcap filter), and `pattern.detect_setup()` as the
+> authoritative detector, with per-source caches (`data/cache/dhan/` and
+> `data/cache/yf/`). See `BACKTEST_SUMMARY.md` for the full write-up.
+
 ---
 
 ## Problem
