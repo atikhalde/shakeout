@@ -118,6 +118,18 @@ UNIVERSE = [
 # NSE symbol -> Yahoo symbol (renamed listings)
 _YF_ALIASES = {"SPR_AUTO": "SHRIPISTON"}
 
+# canonical signal-row columns (used for the CSV header even on 0-signal
+# runs so the CI artifact is ALWAYS produced and the schema never depends
+# on whether a single row happened to exist)
+SIGNAL_FIELDS = [
+    "symbol", "date", "close", "score", "bos", "style", "peak",
+    "flush_low", "ssl",
+    "score_freshness", "score_flush", "score_ssl", "score_bounce",
+    "score_body", "score_trend",
+    "r3", "r5", "r7", "r10", "r15", "max15", "min15",
+    "big_move", "recent",
+]
+
 
 def _fetch_yfinance(sym: str, start: dt.date, end: dt.date) -> dict | None:
     """Daily bars for ONE symbol from Yahoo Finance; None when no data.
@@ -132,7 +144,10 @@ def _fetch_yfinance(sym: str, start: dt.date, end: dt.date) -> dict | None:
         start=start, end=end + dt.timedelta(days=1), auto_adjust=True)
     if df is None or df.empty:
         return None
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    # Volume too: a payload with OHLC but NaN/absent volume "looks healthy"
+    # yet rejects every candidate day at the avg_volume filter - that is a
+    # silent broken-data run, not a quiet market.
+    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
     if df.empty:
         return None
     return {
@@ -531,9 +546,12 @@ def print_summary(rows: list[dict], errors: int, elapsed: float,
 # Excel export (all scoring details)
 # ---------------------------------------------------------------------------
 
-def write_excel(rows: list[dict], path: str) -> None:
-    """Write signals to an .xlsx workbook: sheet 'Signals' (all columns)
-    + sheet 'Summary' (win-rate stats + score buckets)."""
+def write_excel(rows: list[dict], path: str, fetch_report: list[dict] | None = None,
+                fields: list[str] | None = None) -> None:
+    """Write the workbook: sheet 'Signals' (all columns), 'Summary'
+    (win-rate stats + score buckets) and 'FetchReport' (per-symbol data
+    health - always present so a 0-signal run still shows WHY in the
+    uploaded artifact)."""
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
@@ -545,7 +563,8 @@ def write_excel(rows: list[dict], path: str) -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = "Signals"
-    fields = list(rows[0].keys())
+    fields = list(fields) if fields else (
+        list(rows[0].keys()) if rows else [])
     hdr_fill = PatternFill("solid", fgColor="1F4E78")
     hdr_font = Font(color="FFFFFF", bold=True)
     ws.append(fields)
@@ -595,6 +614,27 @@ def write_excel(rows: list[dict], path: str) -> None:
                         round(bm_s / len(sub) * 100, 1)])
     for i, f in enumerate("ABCDEF", 1):
         ws2.column_dimensions[f].width = 12
+
+    # ---- FetchReport sheet: per-symbol data health (ALWAYS written) ----
+    # This is the whole point of the 0-signal CI postmortem: if a run
+    # reports nothing, the artifact must say whether every symbol got
+    # healthy bars, too-few bars, or a hard fetch error.
+    if fetch_report:
+        ws3 = wb.create_sheet("FetchReport")
+        hdr = ["symbol", "status", "bars", "signals", "reason"]
+        ws3.append(hdr)
+        for c in ws3[1]:
+            c.fill = hdr_fill
+            c.font = hdr_font
+        for r in fetch_report:
+            ws3.append([r.get("symbol", ""), r.get("status", ""),
+                        r.get("bars", 0), r.get("signals", 0),
+                        r.get("reason", "")])
+        ws3.freeze_panes = "A2"
+        ws3.auto_filter.ref = ws3.dimensions
+        for i, f in enumerate(hdr, 1):
+            ws3.column_dimensions[chr(64 + i) if i <= 26 else "A"].width = \
+                max(10, min(26, len(f) + 2))
 
     wb.save(path)
     print(f"wrote Excel -> {path}")
@@ -717,10 +757,16 @@ def main() -> int:
     stats: dict = {}
     bar_counts: list[int] = []
     fetched_ok = 0
+    # per-symbol data health -> written to the FetchReport sheet of the
+    # xlsx so every run leaves a diagnosable artifact, even 0-signal runs
+    fetch_report: list[dict] = []
 
     pacer = _Pacer(cfg.yf_min_interval)
     for i, sym in enumerate(symbols, 1):
         attempted = i
+        rec = {"symbol": sym, "status": "error", "bars": 0,
+               "signals": 0, "reason": ""}
+        fetch_report.append(rec)
         try:
             pacer.wait()
             bars = _fetch_yfinance(sym, fetch_start, end)
@@ -733,18 +779,27 @@ def main() -> int:
                 bars = _fetch_yfinance(sym, fetch_start, end)
             if bars is None or len(bars.get("close", [])) < cfg.min_bars:
                 errors += 1
+                nbars = 0 if bars is None else len(bars.get("close", []))
+                rec["status"] = "fail"
+                rec["reason"] = ("no data" if bars is None
+                                 else f"only {nbars} bars (< min_bars={cfg.min_bars})")
                 print(f"  {i}/{len(symbols)} {sym:12s} FAIL "
-                      f"(yfinance: no data)", flush=True)
+                      f"(yfinance: {rec['reason']})", flush=True)
             else:
                 fetched_ok += 1
                 bar_counts.append(len(bars["close"]))
+                rec["bars"] = len(bars["close"])
+                rec["status"] = "ok"
                 got = backtest_symbol(sym, cfg, bars, rows, args.debug_symbol,
                                       since=since_iso, stats=stats)
+                rec["signals"] = got
                 print(f"  {i}/{len(symbols)} {sym:12s} "
                       f"bars={len(bars['close']):4d} signals={got}",
                       flush=True)
         except Exception as e:  # noqa: BLE001
             errors += 1
+            rec["status"] = "error"
+            rec["reason"] = str(e)[:70]
             print(f"  {i}/{len(symbols)} {sym:12s} ERROR {str(e)[:70]}",
                   flush=True)
         # ---- fail fast on a dead data source: if the FIRST
@@ -757,6 +812,11 @@ def main() -> int:
             print(f"  fetch dead for all {attempted} symbols so far - "
                   f"aborting early (skipping the remaining "
                   f"{len(symbols) - attempted})", flush=True)
+            for sym_skip in symbols[attempted:]:
+                fetch_report.append(
+                    {"symbol": sym_skip, "status": "skipped",
+                     "bars": 0, "signals": 0,
+                     "reason": "aborted early (source dead)"})
             break
 
     # ---- cooldown: keep only the FIRST signal per symbol within
@@ -782,17 +842,83 @@ def main() -> int:
         rows = dedup
 
     rows.sort(key=lambda r: r["date"])
-    if rows:
-        with open(args.out, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            w.writeheader()
-            w.writerows(rows)
-        print(f"\nwrote {len(rows)} signals -> {args.out}")
-        # also write Excel with full scoring details
-        xlsx = os.path.splitext(args.out)[0] + ".xlsx"
-        write_excel(rows, xlsx)
+    # ALWAYS write the outputs - even a 0-signal run must leave an
+    # artifact, otherwise the CI upload finds nothing and the "0 signals"
+    # outcome becomes indistinguishable from "the run never happened".
+    # On 0 signals the CSV is header-only and the xlsx still carries the
+    # FetchReport sheet explaining what the data path delivered.
+    with open(args.out, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=SIGNAL_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+    print(f"\nwrote {len(rows)} signals -> {args.out}")
+    # Excel with full scoring details + per-symbol fetch report
+    xlsx = os.path.splitext(args.out)[0] + ".xlsx"
+    write_excel(rows, xlsx, fetch_report=fetch_report, fields=SIGNAL_FIELDS)
 
     print_summary(rows, errors, time.time() - t0, cfg)
+
+    # ---- outage verdict FIRST (it is needed by the diagnostics below,
+    #      and computing it here fixes the previous NameError that read
+    #      `outage` before assignment) ----
+    total = attempted
+    outage = (total >= cfg.data_outage_min_symbols
+              and errors >= cfg.data_outage_error_frac * total)
+    suffix = " (aborted early)" if aborted_outage else ""
+
+    # expected daily bars for the fetch window (~5 trading days / week);
+    # a healthy full-universe run should land near this
+    expected_bars = int((end - fetch_start).days * 5 / 7)
+    if bar_counts:
+        bar_counts.sort()
+        med = bar_counts[len(bar_counts) // 2]
+        fetch = (f"fetched={fetched_ok}/{total} "
+                 f"bars(med={med},min={bar_counts[0]},max={bar_counts[-1]},"
+                 f"expected~{expected_bars})")
+    else:
+        fetch = f"fetched=0/{total} (expected~{expected_bars})"
+
+    # ---- data-health line: always printed, so the run log itself says
+    #      what the fetch delivered (the artifact's FetchReport sheet has
+    #      the same data per symbol) ----
+    ok_syms = sum(1 for r in fetch_report if r["status"] == "ok")
+    print(f"data health: ok={ok_syms}/{total}, fail={errors}, "
+          f"signals={len(rows)} | {fetch}")
+
+    # ---- ZERO-REPORTABLE-DAY class: every symbol fetched >= min_bars but
+    #      produced no candidate day inside the analysis window. With a
+    #      healthy >= 90-day window across a liquid universe this is
+    #      structurally impossible - it means the delivered bars fall
+    #      (almost) entirely in the lookback buffer (e.g. Yahoo returned
+    #      only ~5-8 months of data on a 5y request). That is a silent
+    #      data problem, not a quiet market -> treat as an outage.
+    blind = (not outage and analysis_days >= 90
+             and ok_syms >= cfg.data_outage_min_symbols
+             and stats.get("candidates", 0) == 0)
+    if blind:
+        outage = True
+
+    # ---- PARTIAL-DATA class: half the universe fetched well under the
+    #      expected bar count (truncated-but-valid Yahoo payloads). The
+    #      run may still emit a few signals, but the result is biased --
+    #      make it loud and RED when >= half the symbol set is truncated.
+    #      Gated on long fetch windows (>= 1000 expected bars, i.e. ~5y
+    #      runs) and >= 25 symbols so short-window / --limit debug runs
+    #      and newly listed small caps never false-trip.
+    truncated = [r for r in fetch_report
+                 if r["status"] == "ok"
+                 and r["bars"] < expected_bars * 0.5]
+    if truncated and not outage:
+        print(f"::warning title=Backtest partial data::{len(truncated)}/"
+              f"{total} symbols returned < 50% of the expected "
+              f"~{expected_bars} bars ({fetch}) - check the FetchReport "
+              f"sheet before trusting the signal count.")
+    truncated_outage = (not outage and not blind
+                        and expected_bars >= 1000
+                        and len(truncated) >= max(cfg.data_outage_min_symbols, 25)
+                        and len(truncated) >= cfg.data_outage_error_frac * total)
+    if truncated_outage:
+        outage = True
 
     # ---- zero-signal diagnostics: say WHY (the silent-empty fix) ----
     # A run that fetches healthy data but reports 0 signals is a legitimate
@@ -805,37 +931,39 @@ def main() -> int:
                       if k in groups or k.startswith("prefilter:")),
                      key=lambda kv: -kv[1])
         detail = " | ".join(f"{k}={v}" for k, v in top)
-        if bar_counts:
-            bar_counts.sort()
-            med = bar_counts[len(bar_counts) // 2]
-            fetch = (f"fetched={fetched_ok}/{attempted} "
-                     f"bars(med={med},min={bar_counts[0]},max={bar_counts[-1]})")
-        else:
-            fetch = f"fetched=0/{attempted}"
         print(f"\nREJECTION STATS: candidates={stats.get('candidates', 0)} "
               f"signals={len(rows)} | {detail} | {fetch}")
         if not rows and not outage:
             print(f"::warning title=Backtest 0 signals::0 signals but the data "
                   f"looks healthy ({fetch}). Candidate-day outcomes: {detail}")
+    elif not outage:
+        print(f"\nREJECTION STATS: candidates=0 signals={len(rows)} | {fetch}")
 
     # ---- DATA OUTAGE: most symbols fetched NOTHING (Yahoo unreachable /
-    #      rate-limiting this IP). "0 signals" in this state is a lie - the
+    #      rate-limiting this IP) or the payloads were truncated to the
+    #      point of blindness. "0 signals" in that state is a lie - the
     #      backtest was blind. Same policy as the live scanner (see
     #      scanner.py / the 2026-08-24 silent-outage postmortem): a loud
     #      ::error:: annotation for the Actions run page plus a non-zero
     #      exit code so the run turns RED instead of a green empty result.
-    total = attempted
-    outage = (total >= cfg.data_outage_min_symbols
-              and errors >= cfg.data_outage_error_frac * total)
     if outage:
-        pct = 100.0 * errors / max(total, 1)
-        suffix = " (aborted early)" if aborted_outage else ""
-        print(f"::error title=Backtest data outage::{errors}/{total} symbols "
-              f"failed to fetch ({pct:.0f}%){suffix} - Yahoo Finance "
-              f"unreachable or rate-limiting this IP. '0 signals' is "
+        if blind:
+            reason = (f"0 reportable days for ALL {ok_syms} fetched symbols "
+                      f"({fetch}) - bars look truncated to the lookback "
+                      f"buffer or predate the analysis window")
+        elif truncated_outage:
+            reason = (f"{len(truncated)}/{total} symbols returned < 50% of "
+                      f"the expected ~{expected_bars} bars ({fetch}) - "
+                      f"Yahoo served truncated history")
+        else:
+            pct = 100.0 * errors / max(total, 1)
+            reason = (f"{errors}/{total} symbols failed to fetch "
+                      f"({pct:.0f}%){suffix} - Yahoo Finance unreachable "
+                      f"or rate-limiting this IP")
+        print(f"::error title=Backtest data outage::{reason}. '0 signals' is "
               f"INVALID for this run: rotate the network/retry later.")
-        print(f"ERROR: DATA OUTAGE - {errors}/{total} fetches failed"
-              f"{suffix}; results are not a real backtest.", file=sys.stderr)
+        print(f"ERROR: DATA OUTAGE - {reason}; results are not a real "
+              f"backtest.", file=sys.stderr)
         return EXIT_DATA_OUTAGE
     return 0
 
