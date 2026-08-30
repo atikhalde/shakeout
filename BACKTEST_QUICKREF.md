@@ -1,5 +1,30 @@
 # Backtest Quick Reference
 
+## 🔥 2026-08-30 Fix: Backtest now shows the SAME data as the scanner
+
+The backtest was Yahoo-Finance-only while the scanner's primary source is
+the **Dhan API** — different bars (corporate-action adjustments), a static
+~230-symbol universe instead of the scanner's liquid universe, and an
+inline copy of the pattern that could drift from `pattern.detect_setup`.
+Worse, the Yahoo bars were cached into `data/cache/` — the directory the
+scanner's Dhan client reads its cache from — silently swapping the
+scanner's Dhan data for Yahoo data. And when Yahoo rate-limits the runner
+IP the log fills with `FAIL (yfinance: no data)` + `DATA OUTAGE`.
+
+**Fixed in `backtest.py`:**
+
+| Layer | Before | After |
+|-------|--------|-------|
+| Data source | Yahoo only | **Dhan primary** (same token the scanner uses) + paced yfinance fallback per symbol, exactly like `scanner.run_live()` |
+| Universe | static 230 names | Dhan instrument map → `liquid_universe()` → mcap ≥ 1000 Cr (the scanner's pipeline) |
+| Detector | inline pattern copy | every passing day is confirmed by `pattern.detect_setup` — the scanner's own detector produces dates, levels, scores |
+| Caches | Yahoo bars in `data/cache/` (polluted the scanner's Dhan cache!) | `data/cache/dhan/` vs `data/cache/yf/` — strictly separated per source |
+| Run log | silent about the source | per-symbol `[dhan]`/`[yfinance]` tag + `source[dhan=N yf=M]` health line |
+
+`tests.py` adds a **day-by-day parity sweep**: for every demo symbol, the
+backtest's output must equal a sweep of the scanner's own
+prefilter → detect_setup → threshold pipeline (193 tests, all green).
+
 ## ✅ What Was Fixed
 
 ### Problem: Backtest ≠ Scanner
@@ -66,11 +91,15 @@ python backtest.py --period 2y --min-mcap 5000
 python backtest.py --period 1y --debug-symbol RELIANCE
 ```
 
-### Local Quick Run (No API Token)
+### Local Quick Run
 ```bash
-# Data comes from Yahoo Finance - no token needed, ever
-pip install yfinance
+# Scanner-parity run: Dhan data (same token the scanner uses)
+export DHAN_ACCESS_TOKEN=...        # DhanHQ tokens last ~24h - rotate!
+pip install numpy requests yfinance openpyxl
 python backtest.py --period 2y --limit 100
+
+# No token: Yahoo-only fallback (different bars - NOT scanner-parity)
+python backtest.py --source yfinance --period 2y --limit 100
 ```
 
 ---

@@ -10,7 +10,9 @@ echo "==================================================================="
 echo ""
 echo "This script demonstrates the new --period presets for backtest.py"
 echo ""
-echo "Data source: Yahoo Finance (no API token needed)"
+echo "Data source: Dhan API (the scanner's data, needs DHAN_ACCESS_TOKEN)"
+echo "             with the yfinance fallback per symbol;"
+echo "             add --source yfinance to force Yahoo-only mode."
 echo ""
 
 LIMIT="${LIMIT:-100}"  # keep the demo small (Yahoo rate limits); LIMIT=300 ./run_backtest_demo.sh for more

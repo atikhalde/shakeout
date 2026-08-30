@@ -858,6 +858,50 @@ def test_backtest_avg_volume_no_lookahead() -> None:
           f"dates found: {[r['date'] for r in rows]}")
 
 
+def test_backtest_matches_scanner_detector() -> None:
+    """Regression (2026-08-30 'backtest should show same data as scanner'):
+    for EVERY day of EVERY demo symbol, the backtest must report EXACTLY
+    the (date, score) pairs that a day-by-day sweep of the scanner's own
+    detector (prefilter -> pattern.detect_setup -> score threshold)
+    produces. The backtest's vectorized screen may only pre-filter; the
+    scanner's detect_setup is the authoritative gate - any divergence
+    between screen and detector (missed signals OR phantom signals) fails
+    this test."""
+    print("== backtest output == scanner detect_setup sweep ==")
+    import numpy as np
+    import backtest as bt
+    from config import ScanConfig
+    from demo_data import demo_universe
+    from pattern import detect_setup
+    from prefilter import passes_prefilter
+
+    cfg = ScanConfig()
+    for sym, (dates, bars, _expected) in demo_universe().items():
+        bars2 = {k: np.array(v, float) for k, v in bars.items()
+                 if k not in ("symbol", "dates")}
+        bars2["dates"] = list(dates)
+
+        rows = []
+        bt.backtest_symbol(sym, cfg, bars2, rows)
+        got = {(r["date"], round(r["score"], 1)) for r in rows}
+
+        want = set()
+        for t in range(cfg.min_bars, len(dates)):
+            day_bars = {k: v[:t + 1] for k, v in bars2.items()}
+            day_bars["symbol"] = sym
+            ok, _why = passes_prefilter(day_bars, cfg)
+            if not ok:
+                continue
+            sig = detect_setup(day_bars, dates[:t + 1], cfg)
+            if sig and sig["score"] >= cfg.score_threshold:
+                want.add((dates[t], round(sig["score"], 1)))
+
+        check(f"{sym}: backtest rows == scanner detector sweep",
+              got == want,
+              f"backtest-only={sorted(got - want)} "
+              f"scanner-only={sorted(want - got)}")
+
+
 def test_backtest_period_presets_fetch_lookahead() -> None:
     """Regression (2026-08-29 'backtest not working'): --period presets used
     the ANALYSIS window as the FETCH window, so every short preset failed
@@ -885,7 +929,8 @@ def test_backtest_period_presets_fetch_lookahead() -> None:
         return good
 
     tmp = tempfile.mkdtemp()
-    argv = ["--period", "1m", "--limit", "2", "--min-mcap", "0",
+    argv = ["--source", "yfinance",      # Yahoo-only mode: no Dhan client
+            "--period", "1m", "--limit", "2", "--min-mcap", "0",
             "--out", os.path.join(tmp, "sig.csv")]
     out = io.StringIO()
     with mock.patch.object(bt, "_fetch_yfinance", fake_fetch), \
@@ -945,13 +990,13 @@ def test_backtest_symbol_since_window() -> None:
 
 
 def test_backtest_data_outage_loud_exit() -> None:
-    """Regression (2026-08-29): a backtest where Yahoo fetches nothing used
+    """Regression (2026-08-29): a backtest where every fetch fails used
     to exit 0 with a polite '0 signals' - a green CI run that hid the outage
     (same class of bug as the 2026-08-24 scanner outage). A dead data source
     must abort early, print a ::error:: annotation and exit non-zero; a
-    partially failing run is NOT an outage and still exits 0. Also keeps the
-    old workflow's --source/--no-cache/--resume flags parsing (the 18:38
-    exit-code-2 failure)."""
+    partially failing run is NOT an outage and still exits 0. Also proves
+    the old workflow's --source/--no-cache flags parse with the NEW Dhan
+    primary + yfinance fallback chain (dead token -> fallback -> outage)."""
     print("== backtest data outage: early abort + non-zero exit ==")
     import io
     import os
@@ -969,12 +1014,33 @@ def test_backtest_data_outage_loud_exit() -> None:
 
     tmp = tempfile.mkdtemp()
 
+    # fake Dhan universe of 30 symbols whose token is dead: every
+    # get_daily raises DhanAuthError instantly, so every symbol must ride
+    # the (also mocked-dead) yfinance fallback -> total outage. No real
+    # network in this test.
+    from dhan_client import DhanAuthError
+    fake_map = {f"S{i:02d}": str(1000 + i) for i in range(30)}
+
+    class DeadDhan:
+        auth_dead = True
+
+        def get_instruments(self):
+            return dict(fake_map)
+
+        def liquid_universe(self):
+            return sorted(fake_map)
+
+        def get_daily(self, *a, **k):
+            raise DhanAuthError("token rejected in test")
+
     # ---- total outage: every fetch fails ------------------------------
     out = io.StringIO()
     argv = ["--source", "dhan", "--no-cache",        # old workflow flags
             "--years", "2", "--limit", "30", "--min-mcap", "0",
             "--out", os.path.join(tmp, "none.csv")]
     with mock.patch.object(bt, "ScanConfig", FastCfg), \
+            mock.patch.object(bt, "_make_dhan_client",
+                              lambda *a, **k: DeadDhan()), \
             mock.patch.object(bt, "_fetch_yfinance",
                               lambda *a, **k: None), \
             mock.patch.object(bt.sys, "argv", ["backtest.py"] + argv), \
@@ -987,8 +1053,11 @@ def test_backtest_data_outage_loud_exit() -> None:
           "::error title=Backtest data outage::" in text, text[-300:])
     check("aborted early instead of grinding all 30 symbols",
           "aborting early" in text and "30/30" not in text, text[-300:])
-    check("old workflow flags (--source/--no-cache) still parse",
-          "NOTICE: --source dhan is deprecated" in text, text[:200])
+    check("old workflow flags (--source dhan/--no-cache) still parse "
+          "with the new Dhan-primary chain",
+          "Dhan rejected the access token" in text, text[:400])
+    check("outage names BOTH sources (dhan + yfinance)",
+          "dhan+yfinance" in text, text[-600:])
 
     # ---- partial failure (1 of 6) is NOT an outage ---------------------
     from demo_data import demo_universe
@@ -1000,7 +1069,8 @@ def test_backtest_data_outage_loud_exit() -> None:
         return None if sym == "RELIANCE" else good
 
     out = io.StringIO()
-    argv = ["--years", "2", "--limit", "6", "--min-mcap", "0",
+    argv = ["--source", "yfinance",          # Yahoo-only mode: no Dhan
+            "--years", "2", "--limit", "6", "--min-mcap", "0",
             "--out", os.path.join(tmp, "partial.csv")]
     with mock.patch.object(bt, "ScanConfig", FastCfg), \
             mock.patch.object(bt, "_fetch_yfinance", flaky_fetch), \
@@ -1029,6 +1099,7 @@ def test_backtest_yfinance_disk_cache() -> None:
     _dates, _bars, _ = demo_universe()["SPORTKING"]
     tmp = tempfile.mkdtemp()
     orig = bt.CACHE_DIR
+    orig_dhan = bt.DHAN_CACHE_DIR
     bt.CACHE_DIR = tmp
     try:
         bars = {k: np.asarray(v, float) for k, v in _bars.items()
@@ -1068,6 +1139,15 @@ def test_backtest_yfinance_disk_cache() -> None:
                 use_cache=False)
         check("--no-cache does not serve the disk file (forces Yahoo)",
               miss is None and called["n"] == 1, f"n={called['n']}")
+        # the 2026-08-30 cache-separation fix: the Dhan client's cache and
+        # the yfinance fallback cache must never share a directory, or
+        # Yahoo bars silently masquerade as Dhan bars in the scanner's
+        # cache (the exact cross-contamination the old backtest caused).
+        check("dhan and yfinance caches are separated per source",
+              orig_dhan != orig
+              and orig_dhan.endswith("dhan")
+              and orig.endswith("yf"),
+              f"dhan={orig_dhan} yf={orig}")
     finally:
         bt.CACHE_DIR = orig
 
@@ -1380,6 +1460,7 @@ def main() -> int:
     test_aci_26w_proximity()
     test_backtest_finds_verified_stocks()
     test_backtest_avg_volume_no_lookahead()
+    test_backtest_matches_scanner_detector()
     test_backtest_period_presets_fetch_lookahead()
     test_backtest_symbol_since_window()
     test_backtest_data_outage_loud_exit()
