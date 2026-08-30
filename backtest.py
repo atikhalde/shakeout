@@ -131,13 +131,88 @@ SIGNAL_FIELDS = [
 ]
 
 
-def _fetch_yfinance(sym: str, start: dt.date, end: dt.date) -> dict | None:
+CACHE_DIR = os.path.join("data", "cache")
+
+
+def _cache_path(sym: str) -> str:
+    return os.path.join(CACHE_DIR, f"{sym}.csv")
+
+
+def _read_bar_cache(sym: str) -> dict | None:
+    path = _cache_path(sym)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        if not rows:
+            return None
+        return {
+            "open": np.array([float(r["open"]) for r in rows], float),
+            "high": np.array([float(r["high"]) for r in rows], float),
+            "low": np.array([float(r["low"]) for r in rows], float),
+            "close": np.array([float(r["close"]) for r in rows], float),
+            "volume": np.array([float(r.get("volume", 0) or 0) for r in rows], float),
+            "dates": [r["date"] for r in rows],
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _write_bar_cache(sym: str, bars: dict) -> None:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        with open(_cache_path(sym), "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["date", "open", "high", "low", "close", "volume"])
+            for i in range(len(bars["dates"])):
+                w.writerow([
+                    bars["dates"][i], bars["open"][i], bars["high"][i],
+                    bars["low"][i], bars["close"][i], bars["volume"][i],
+                ])
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _slice_bars(bars: dict, start: dt.date, end: dt.date) -> dict | None:
+    lo, hi = 0, len(bars["dates"])
+    start_s, end_s = start.isoformat(), end.isoformat()
+    for i, d in enumerate(bars["dates"]):
+        if d >= start_s:
+            lo = i
+            break
+    else:
+        return None
+    for i, d in enumerate(bars["dates"]):
+        if d > end_s:
+            hi = i
+            break
+    if hi <= lo:
+        return None
+    out = {}
+    for k, v in bars.items():
+        out[k] = v[lo:hi] if not isinstance(v, str) else v
+    return out
+
+
+def _fetch_yfinance(sym: str, start: dt.date, end: dt.date,
+                    use_cache: bool = True) -> dict | None:
     """Daily bars for ONE symbol from Yahoo Finance; None when no data.
 
     yfinance history(end=...) is EXCLUSIVE, so +1 day is added (the same
     fix the live scanner's _yf_daily applies) - otherwise the newest bar
     is silently dropped.
+
+    When `use_cache` is True, a CSV under data/cache/<SYM>.csv is reused
+    if it already covers `end` (the GitHub Actions cache step restores
+    this directory). Without a disk cache every CI run re-downloads the
+    whole universe and Yahoo 429s the runner IP.
     """
+    if use_cache:
+        cached = _read_bar_cache(sym)
+        if cached and cached["dates"] and cached["dates"][-1] >= end.isoformat():
+            return _slice_bars(cached, start, end)
+
     import yfinance as yf
     yf_sym = _YF_ALIASES.get(sym, sym)
     df = yf.Ticker(f"{yf_sym}.NS").history(
@@ -150,7 +225,7 @@ def _fetch_yfinance(sym: str, start: dt.date, end: dt.date) -> dict | None:
     df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
     if df.empty:
         return None
-    return {
+    bars = {
         "open": df["Open"].to_numpy(float),
         "high": df["High"].to_numpy(float),
         "low": df["Low"].to_numpy(float),
@@ -158,6 +233,9 @@ def _fetch_yfinance(sym: str, start: dt.date, end: dt.date) -> dict | None:
         "volume": df["Volume"].to_numpy(float),
         "dates": [d.date().isoformat() for d in df.index],
     }
+    if use_cache:
+        _write_bar_cache(sym, bars)
+    return bars
 
 
 class _Pacer:
@@ -685,9 +763,10 @@ def main() -> int:
     if args.source == "dhan":
         print("NOTICE: --source dhan is deprecated; this backtest uses "
               "Yahoo Finance only.")
-    if args.no_cache or args.resume:
-        print("NOTICE: cache/resume flags are deprecated; this backtest "
-              "does not use a daily-bar cache.")
+    if args.resume:
+        print("NOTICE: --resume is deprecated; the daily-bar cache is "
+              "always reused when present.")
+    use_cache = not args.no_cache
 
     cfg = ScanConfig()
     if args.min_score is not None:
@@ -769,14 +848,14 @@ def main() -> int:
         fetch_report.append(rec)
         try:
             pacer.wait()
-            bars = _fetch_yfinance(sym, fetch_start, end)
+            bars = _fetch_yfinance(sym, fetch_start, end, use_cache=use_cache)
             if (bars is None or len(bars.get("close", [])) < cfg.min_bars) \
                     and cfg.yf_retry_delay > 0:
                 # ONE retry after a short pause (transient Yahoo 429s) -
                 # same policy as the live scanner's _YfGate
                 time.sleep(cfg.yf_retry_delay)
                 pacer.wait()
-                bars = _fetch_yfinance(sym, fetch_start, end)
+                bars = _fetch_yfinance(sym, fetch_start, end, use_cache=use_cache)
             if bars is None or len(bars.get("close", [])) < cfg.min_bars:
                 errors += 1
                 nbars = 0 if bars is None else len(bars.get("close", []))
