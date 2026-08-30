@@ -339,41 +339,34 @@ def test_aci_26w_proximity() -> None:
 def test_run_live_unpack() -> None:
     """Regression: run_live's scan_one must always return 3-tuples
     (the GitHub runner crashed with 'expected 3, got 2')."""
-    print("== run_live end-to-end (mocked Dhan, exercises unpack) ==")
+    print("== run_live end-to-end (mocked yfinance, exercises unpack) ==")
     import os
     import tempfile
     import types
     import unittest.mock as mock
     import scanner as scanner_mod
 
-    # fake client: instruments + daily bars (returns the demo SPORTKING tail)
+    # fake fetch: returns the demo SPORTKING tail via the yfinance seam
+    # (post-#15 run_live is yfinance-only; the old DhanClient seam is gone)
     from demo_data import demo_universe
     _dates, _bars, _exp = demo_universe()["SPORTKING"]
     _bars = {k: list(v) for k, v in _bars.items()}
     _bars["dates"] = list(_dates)
 
-    class FakeClient:
-        def __init__(self, *a, **k): pass
-        def get_instruments(self):
-            return {"SPORTKING": "1", "BAJFINANCE": "2", "SPR_AUTO": "3"}
-        def liquid_universe(self):
-            return ["SPORTKING", "BAJFINANCE", "SPR_AUTO"]
-        def resolve_symbol(self, s): return "1"
-        def get_daily(self, sym, *a, **k):
-            # deliberately DROP the symbol (like a cache read / yfinance
-            # fallback would) - scanner must restore it before alerting
-            b = {kk: list(vv) for kk, vv in _bars.items()
-                 if kk != "symbol"}
-            return b
-        def intraday_partial(self, *a, **k): return None
+    def fake_yf_daily(sym, *a, **k):
+        # deliberately DROP the symbol (like a cache read / yfinance
+        # fallback would) - scanner must restore it before alerting
+        return {kk: list(vv) for kk, vv in _bars.items()
+                if kk != "symbol"}
 
-    import dhan_client as dhan_mod
     # pin a tiny watchlist - the repo's watchlist.txt is user-managed data
     # (now ~120 large-caps) and must not drive test expectations
     wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
     with open(wl, "w") as f:
         f.write("SPORTKING\nBAJFINANCE\nSPR_AUTO\n")
-    with mock.patch.object(dhan_mod, "DhanClient", FakeClient):
+    with mock.patch.object(scanner_mod, "_yf_daily", fake_yf_daily), \
+         mock.patch.object(scanner_mod, "_YfGate",
+                           lambda *a, **k: scanner_gate_stub()):
         cfg = ScanConfig()
         # isolate: never let a repo-level signals_tracker.csv (from an
         # earlier run) suppress this test's signals via the cross-run
@@ -445,13 +438,19 @@ def test_cross_run_cooldown_and_summary() -> None:
             return b
         def intraday_partial(self, *a, **k): return None
 
+    def fake_yf_daily(sym, *a, **k):
+        return {kk: list(vv) for kk, vv in _bars.items() if kk != "symbol"}
+
     cfg = ScanConfig()
     cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "signals_tracker.csv")
     # pin a tiny watchlist (repo watchlist.txt is user-managed, ~120 symbols)
     wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
     with open(wl, "w") as f:
         f.write("SPORTKING\nBAJFINANCE\nSPR_AUTO\n")
-    with mock.patch.object(dhan_mod, "DhanClient", FakeClient):
+    with mock.patch.object(dhan_mod, "DhanClient", FakeClient), \
+         mock.patch.object(scanner_mod, "_yf_daily", fake_yf_daily), \
+         mock.patch.object(scanner_mod, "_YfGate",
+                           lambda *a, **k: scanner_gate_stub()):
         first = scanner_mod.run_live(cfg, "tok", "cid", limit=0,
                                      watchlist=wl, from_days=400,
                                      force_refresh=False, debug=False,
@@ -636,20 +635,12 @@ def test_run_live_all_scan_one_paths() -> None:
         "volume": [1e6] * n,
     }
 
-    class FakeClient:
-        def __init__(self, *a, **k): pass
-        def get_instruments(self):
-            return {"GOOD": "1", "REDS": "2", "NODATA": "3"}
-        def liquid_universe(self):
-            return ["GOOD", "REDS", "NODATA"]
-        def resolve_symbol(self, s): return "1"
-        def get_daily(self, sym, *a, **k):
-            if sym == "GOOD":
-                return {kk: list(vv) for kk, vv in _bars.items()}
-            if sym == "REDS":
-                return {k2: list(v2) for k2, v2 in red_bars.items()}
-            return None                     # NODATA: Dhan has nothing
-        def intraday_partial(self, *a, **k): return None
+    def fake_yf_daily(sym, *a, **k):
+        if sym == "GOOD":
+            return {kk: list(vv) for kk, vv in _bars.items()}
+        if sym == "REDS":
+            return {k2: list(v2) for k2, v2 in red_bars.items()}
+        return None                         # NODATA: source has nothing
 
     wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
     with open(wl, "w") as f:
@@ -661,8 +652,9 @@ def test_run_live_all_scan_one_paths() -> None:
     import io
     import contextlib
     buf = io.StringIO()
-    with mock.patch.object(dhan_mod, "DhanClient", FakeClient), \
-         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None):
+    with mock.patch.object(scanner_mod, "_yf_daily", fake_yf_daily), \
+         mock.patch.object(scanner_mod, "_YfGate",
+                           lambda *a, **k: scanner_gate_stub()):
         with contextlib.redirect_stdout(buf):
             rows = scanner_mod.run_live(
                 cfg, "tok", "cid", limit=0, watchlist=wl, from_days=400,
@@ -692,32 +684,23 @@ def test_quiet_run_artifacts_and_summary() -> None:
     import tempfile
     import unittest.mock as mock
     import scanner as scanner_mod
-    import dhan_client as dhan_mod
     from demo_data import demo_universe
 
     _dates, _bars, _exp = demo_universe()["SPORTKING"]
     _bars = {k: list(v) for k, v in _bars.items()}
     _bars["dates"] = list(_dates)
 
-    class DeadClient:  # Dhan auth dead -> summary must say so, not hide it
-        auth_dead = True
-        def __init__(self, *a, **k): pass
-        def get_instruments(self): return {"GOOD": "1"}
-        def liquid_universe(self): return ["GOOD"]
-        def resolve_symbol(self, s): return "1"
-        def get_daily(self, *a, **k):
-            raise dhan_mod.DhanAuthError("401 dead token")
-        def intraday_partial(self, *a, **k): return None
-
+    # (post-#15: the live scan is yfinance-only; a dead data source now
+    #  shows up as fetch ERRORS in the data-health summary line instead
+    #  of the old "Dhan OFFLINE" flag)
     wl = os.path.join(tempfile.mkdtemp(), "watchlist.txt")
     with open(wl, "w") as f:
         f.write("GOOD\n")
 
-    # ---- run_live level: summary sink gets stats + the offline flag ----
+    # ---- run_live level: summary sink gets stats + data health ----
     cfg = ScanConfig()
     cfg.tracker_file = os.path.join(tempfile.mkdtemp(), "tracker.csv")
-    with mock.patch.object(dhan_mod, "DhanClient", DeadClient), \
-         mock.patch.object(scanner_mod, "_yf_daily",
+    with mock.patch.object(scanner_mod, "_yf_daily",
                            lambda *a, **k: {**_bars}):
         summary: list = []
         scanner_mod.run_live(cfg, "tok", "cid", limit=0, watchlist=wl,
@@ -726,8 +709,9 @@ def test_quiet_run_artifacts_and_summary() -> None:
                              summary_sink=summary)
     check("summary sink carries scan stats",
           any(l.startswith("scan: ") for l in summary), summary)
-    check("summary surfaces Dhan-offline state",
-          any("Dhan OFFLINE" in l for l in summary), summary)
+    check("summary surfaces data-source health",
+          any(l.startswith("data health: 1/1 fetched") for l in summary),
+          summary)
 
     # ---- main() level quiet run: summary file written, no signals CSV ----
     tmp = tempfile.mkdtemp()
@@ -736,8 +720,7 @@ def test_quiet_run_artifacts_and_summary() -> None:
     env = {"DHAN_ACCESS_TOKEN": "tok", "GITHUB_STEP_SUMMARY": gh_summary,
            "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""}
     argv = ["--mode", "live", "--watchlist", wl, "--out", out_csv]
-    with mock.patch.object(dhan_mod, "DhanClient", DeadClient), \
-         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None), \
+    with mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None), \
          mock.patch.dict(os.environ, env):
         rc = scanner_mod.main(argv)
     check("quiet main() exits 0", rc == 0)
@@ -749,15 +732,14 @@ def test_quiet_run_artifacts_and_summary() -> None:
     side = open(out_csv + ".summary.txt").read()
     check("summary sidecar carries scan stats + result",
           "scan: " in side and "result: 0 signal(s)" in side
-          and "Dhan OFFLINE" in side, side)
+          and "data health: 0/1 fetched (1 failed)" in side, side)
     check("stats also appended to $GITHUB_STEP_SUMMARY",
           os.path.exists(gh_summary)
           and "scan: " in open(gh_summary).read())
 
     # ---- main() with a signal: the CSV appears, header = TABLE_FIELDS ----
     out_csv2 = os.path.join(tmp, "signals2.csv")
-    with mock.patch.object(dhan_mod, "DhanClient", DeadClient), \
-         mock.patch.object(scanner_mod, "_yf_daily",
+    with mock.patch.object(scanner_mod, "_yf_daily",
                            lambda *a, **k: {**_bars}), \
          mock.patch.dict(os.environ, env):
         cfg2 = ScanConfig()
@@ -1244,6 +1226,8 @@ def test_data_outage_detection() -> None:
 
     class PartialClient(DeadClient):
         # 10 of 40 symbols fail (25%) -> below the 50% outage threshold
+        # (kept for documentation; post-#15 the simulation runs on the
+        #  _yf_daily seam below, not on this Dhan client)
         OK = {f"S{i}" for i in range(30)}
         def __init__(self, good_bars, *a, **k):
             self._good = good_bars
@@ -1320,9 +1304,13 @@ def test_data_outage_detection() -> None:
           scanner_mod.LAST_RUN_STATS)
 
     # ---- 25% failures: degraded but healthy enough -> no outage ---------
-    with mock.patch.object(dhan_mod, "DhanClient",
-                           lambda *a, **k: PartialClient(good_bars)), \
-         mock.patch.object(scanner_mod, "_yf_daily", lambda *a, **k: None), \
+    # (post-#15: run_live fetches via the yfinance seam only, so the
+    #  partial-failure simulation lives on _yf_daily, not DhanClient)
+    def partial_yf_daily(sym, *a, **k):
+        if str(sym) in {f"S{i}" for i in range(30)}:
+            return {k: list(v) for k, v in good_bars.items()}
+        return None
+    with mock.patch.object(scanner_mod, "_yf_daily", partial_yf_daily), \
          mock.patch.object(scanner_mod, "_YfGate",
                            lambda *a, **k: scanner_gate_stub()):
         fn2 = FakeNotifier()
