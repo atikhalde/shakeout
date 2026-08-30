@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BOS -> flush -> SSL-retest -> reversal scanner (daily, NSE via Dhan API).
+BOS -> flush -> SSL-retest -> reversal scanner (daily, yfinance-backed).
 
 Find stocks that just printed the shakeout-retest reversal candle BEFORE the
 big momentum move - the exact setup seen in:
@@ -13,7 +13,7 @@ Usage:
     # demo mode (built-in test data, no API needed):
     python scanner.py --mode demo
 
-    # live scan of the whole NSE universe (needs Dhan token):
+    # live scan of the whole NSE universe (yfinance-backed; no Dhan needed):
     export DHAN_ACCESS_TOKEN=your_token
     export DHAN_CLIENT_ID=your_client_id        # optional
     python scanner.py --mode live --limit 300
@@ -355,7 +355,6 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
              debug: bool, intraday: bool = False,
              notifier: TelegramNotifier | None = None,
              summary_sink: list[str] | None = None) -> list[dict]:
-    from dhan_client import DhanClient, DhanAuthError
     from universes import get_universe
 
     def _summary(line: str) -> None:
@@ -364,41 +363,31 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         if summary_sink is not None:
             summary_sink.append(line)
 
-    client = DhanClient(token, client_id,
-                        min_interval=cfg.live_request_interval,
-                        timeout=cfg.api_timeout)
-
-    # ---- universe: Dhan instrument map first, watchlist/fallback otherwise ----
-    try:
-        instruments = client.get_instruments()
-        print(f"instrument map: {len(instruments)} NSE equities")
-    except Exception as e:  # noqa: BLE001
-        instruments = {}
-        print(f"WARNING: instrument map unavailable ({e}); "
-              f"falling back to watchlist/static list", file=sys.stderr)
-
+    # ---- universe: watchlist or market_cap.csv fallback (no Dhan) ----
     if watchlist:
         with open(watchlist) as f:
             symbols = [ln.strip().upper() for ln in f if ln.strip()
                        and not ln.strip().startswith("#")]
         source = f"watchlist ({len(symbols)} syms)"
         print(f"universe: {source}")
-    elif instruments:
-        symbols = client.liquid_universe() or sorted(instruments.keys())
-        source = f"dhan-instruments ({len(symbols)} syms)"
-        print(f"universe: {source}")
     else:
-        symbols, source = get_universe()
-        print(f"universe: {source}")
-        # only keep symbols we can resolve (need a security id)
-        if not instruments:
-            resolved = [s for s in symbols if client.resolve_symbol(s)]
-            print(f"  -> {len(resolved)} symbols resolvable via instrument map")
-            symbols = resolved
+        # read symbols from the bundled market_cap.csv (symbol, mcap_cr)
+        mcap_path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "data", "market_cap.csv")
+        if not os.path.exists(mcap_path):
+            mcap_path = os.path.join(os.getcwd(), "data", "market_cap.csv")
+        mcap = load_mcap(mcap_path)
+        if mcap:
+            symbols = list(mcap.keys())
+            print(f"universe: market_cap.csv ({len(symbols)} syms)")
+        else:
+            # fallback to the built-in demo universe (small set)
+            from demo_data import demo_universe
+            symbols = list(demo_universe().keys())
+            print(f"universe: demo universe ({len(symbols)} syms)")
     if limit:
         symbols = symbols[:limit]
         print(f"limit: scanning first {limit} symbols")
-
     # ---- prefilter: market cap > X Cr BEFORE any API calls (big win) ----
     pref_skipped = 0
     mcap = None                    # (else NameError below when prefilter off)
@@ -434,10 +423,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     t0 = _t.time()
     signals, errors = [], 0
     total = len(symbols)
-    _auth_warned = [False]   # one-time "Dhan token dead" console warning
-    # the yfinance fallback is PACED process-wide: free-running it (when
-    # Dhan's 24h token is dead) provokes Yahoo 429s and turns a degraded
-    # data day into a zero-data day (the 2026-08-24..28 silent outage)
+    # the yfinance fallback is PACED process-wide: paced to avoid Yahoo 429s
     yf_gate = _YfGate(cfg.yf_min_interval, cfg.yf_retry_delay)
     import threading as _thr
     _pref_lock = _thr.Lock()
@@ -453,43 +439,20 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     def scan_one(sym: str):
         """Fetch + detect for one symbol. Returns a 4-tuple
         (sig, err, pref_skipped, near_miss) - EVERY path must return all
-        four or run_live's unpack crashes the whole scan (the exact class
-        of bug PR #2 fixed for 3-tuples).
-        PRIMARY = Dhan; on ANY failure, instant yfinance fallback, PACED
-        via yf_gate so a Dhan outage can't DDoS the fallback."""
-        # ---- 1) Dhan ----
-        bars = None
-        dhan_err = ""
-        try:
-            bars = client.get_daily(sym, from_date, to_date,
-                                    force_refresh=force_refresh)
-        except DhanAuthError as e:
-            # dead/expired token: the client now fails every call instantly,
-            # so the whole run finishes on the yfinance fallback
-            dhan_err = f"DhanAuthError: {e}"[:80]
-            if not _auth_warned[0]:
-                _auth_warned[0] = True
-                print("WARNING: Dhan rejected the access token (401/403) - "
-                      "scanning continues on the yfinance fallback only. "
-                      "DhanHQ tokens are valid ~24 hours: rotate "
-                      "DHAN_ACCESS_TOKEN to restore Dhan data.",
-                      file=sys.stderr)
-        except Exception as e:  # noqa: BLE001
-            dhan_err = str(e)[:60]
-        if bars is None or len(bars.get("close", [])) < cfg.min_bars:
-            # ---- 2) instant (but PACED) yfinance fallback ----
-            bars = yf_gate.call(_yf_daily, sym, from_date, to_date)
-            if bars is None:
-                which = f"dhan[{dhan_err}]+yf[failed]" if dhan_err \
-                    else "no data (dhan+yf failed)"
-                return None, which[:200], False, None
+        four or run_live's unpack crashes the whole scan.
+        PRIMARY = yfinance (paced); on any failure the paced yfinance fallback
+        is used exclusively - no Dhan dependency.
+        """
+        # ---- 1) yfinance daily bars (paced) ----
+        bars = yf_gate.call(_yf_daily, sym, from_date, to_date)
+        if bars is None:
+            return None, "", False, None
 
         # ---- normalize dates to ISO (epoch-safe, cache-safe) ----
-        from dhan_client import _iso_date
         bars["dates"] = [_iso_date(d) for d in bars["dates"]]
-        # the symbol is dropped by some sources (Dhan cache reads, the
-        # yfinance fallback) - without it the Telegram alert arrives as
-        # "PATTERN SIGNAL — ?" and you can't tell which stock it is
+        # the symbol is dropped by some sources (cache reads) - without it
+        # the Telegram alert arrives as "PATTERN SIGNAL — ?" and you can't
+        # tell which stock it is
         bars["symbol"] = sym
 
         # ---- prefilter: weekly RSI/MACD + close>100 + green daily ----
@@ -509,14 +472,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         if intraday:
             last_d = bars["dates"][-1] if bars["dates"] else ""
             if last_d < today_s:
-                partial = None
-                try:
-                    partial = client.intraday_partial(sym, to_date)
-                except Exception:  # noqa: BLE001
-                    partial = None
-                if partial is None:
-                    # paced fallback (same gate as the daily-bar path)
-                    partial = yf_gate.call(_yf_intraday_partial, sym, to_date)
+                partial = yf_gate.call(_yf_intraday_partial, sym, to_date)
                 if partial:
                     try:
                         bars, live_merged = merge_partial(bars, partial,
@@ -583,22 +539,11 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     _summary(f"scan: {total} scanned · {len(signals)} signals · "
              f"{errors} errors · {pref_skipped} prefilter-skipped "
              f"· score>= {cfg.score_threshold:.0f}")
-    # ---- data-source health: Dhan dead -> yfinance fallback is FINE for
-    #      daily bars but must be VISIBLE (a silently-stale token is how the
-    #      2026-08-24/25 quiet-days confusion started) ----
-    dhan_offline = bool(getattr(client, "auth_dead", False) or _auth_warned[0])
-    if dhan_offline:
-        msg = ("WARNING: Dhan was OFFLINE this run (rejected/expired token) - "
-               "all data came from the yfinance fallback. "
-               "DhanHQ tokens are valid ~24 hours: rotate "
-               "DHAN_ACCESS_TOKEN to restore primary data.")
-        print(msg, file=sys.stderr)
-        _summary("data: Dhan OFFLINE (expired token? they last ~24h) - "
-                 "yfinance fallback used; rotate DHAN_ACCESS_TOKEN")
-    else:
-        _summary("data: Dhan OK")
+    # ---- data-source health: yfinance fallback is FINE for daily bars ----
+    # (a silently-stale token is no longer an issue since we no longer use Dhan)
+    _summary("data: yfinance fallback OK")
 
-    # ---- DATA OUTAGE: most symbols fetched NOTHING (Dhan dead AND the
+    # ---- DATA OUTAGE: most symbols fetched NOTHING (yfinance fallback failing)
     #      yfinance fallback failing). '0 signals' in this state is a lie -
     #      the scanner was blind. For 4 days around 2026-08-24 every run
     #      was an outage that looked like a polite quiet day (green check,
@@ -613,8 +558,6 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         pct = 100.0 * errors / max(total, 1)
         outage_text = (
             f"{errors}/{total} symbols failed to fetch ({pct:.0f}%)"
-            + (" · Dhan OFFLINE (token rejected - DhanHQ tokens last "
-               "~24h, rotate DHAN_ACCESS_TOKEN)" if dhan_offline else "")
             + (" · yfinance fallback also failing (Yahoo rate-limit?)"
                if errors else ""))
         print(f"::error title=Scanner data outage::{outage_text}. This run "
@@ -631,7 +574,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     LAST_RUN_STATS.clear()
     LAST_RUN_STATS.update({
         "total": total, "errors": errors, "signals": len(signals),
-        "pref_skipped": pref_skipped, "dhan_offline": dhan_offline,
+        "pref_skipped": pref_skipped,
         "outage": outage,
     })
     if errors and err_by_type:
@@ -715,9 +658,6 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         scope = f"{len(symbols)} symbols"
         stats = (f"scanned {len(symbols)} · prefilter-skipped {pref_skipped} "
                  f"· errors {errors}")
-        if dhan_offline:
-            stats = ("⚠️ DHAN OFFLINE (yfinance fallback - rotate token) · "
-                     + stats)
         if cooldown_skipped:
             stats += f" · {cooldown_skipped} re-alert(s) suppressed by cooldown"
         if near_misses:
@@ -745,9 +685,9 @@ def main(argv=None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--mode", choices=["demo", "live"], default="demo",
                    help="demo = built-in test data; live = Dhan API")
-    p.add_argument("--token", default=None, help="Dhan access token "
+    p.add_argument("--token", default=None, help="Dhan access token (optional, yfinance used if absent)"
                    "(or set DHAN_ACCESS_TOKEN)")
-    p.add_argument("--client-id", default=None, help="Dhan client id "
+    p.add_argument("--client-id", default=None, help="Dhan client id (optional, yfinance used if absent)"
                    "(or set DHAN_CLIENT_ID)")
     p.add_argument("--limit", type=int, default=0,
                    help="live: scan only the first N symbols")
@@ -764,7 +704,7 @@ def main(argv=None) -> int:
     p.add_argument("--refresh", action="store_true",
                    help="live: ignore cached daily bars")
     p.add_argument("--intraday", action="store_true",
-                   help="live: also fetch today's partial candle from Dhan "
+                   help="live: also fetch today's partial candle (yfinance)"
                         "intraday data so signals fire DURING market hours "
                         "(run this every ~15 min while the market is open)")
     p.add_argument("--debug", action="store_true")
@@ -799,7 +739,7 @@ def main(argv=None) -> int:
         token = args.token or os.environ.get("DHAN_ACCESS_TOKEN")
         client_id = args.client_id or os.environ.get("DHAN_CLIENT_ID")
         if not token:
-            print("ERROR: Dhan access token required. Set DHAN_ACCESS_TOKEN "
+            print("Dhan access token not needed (yfinance used by default)"
                   "or pass --token (create one at Dhan -> Settings -> API).",
                   file=sys.stderr)
             return 2
