@@ -389,6 +389,13 @@ Tips:
   for the whole static universe (~230 liquid names, ~6-12 min in Actions).
 - The backtest paces its Yahoo calls (0.6s apart) so the runner IP does
   not get 429-rate-limited; expect roughly a second per symbol.
+- `--period 1m/6m/...` presets define the window signals are REPORTED
+  from; the pattern's own lookback (~26 weeks) is fetched automatically
+  on top, so short windows still have full BOS/SSL history behind them.
+- If (nearly) every symbol fails to fetch (Yahoo blocking the runner IP),
+  the run is a **data outage**: it aborts early, prints a `::error::`
+  annotation and exits non-zero — a red Actions run instead of a green,
+  meaningless "0 signals" (same policy as the live scanner).
 - **Live scanner only:** Dhan → yfinance failover is INSTANT (no retry
   back-off waits): a rejected token (401/403) marks Dhan dead for the
   rest of the run, a 429 pauses Dhan for a few seconds while the current

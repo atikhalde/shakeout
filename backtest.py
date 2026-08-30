@@ -31,10 +31,19 @@ Usage:
     # or an explicit window / score threshold:
     python backtest.py --years 2 --limit 500 --min-score 55
 
+    A period/year window is the ANALYSIS window (signals are only reported
+    inside it). The pattern's own lookback (min_bars ~ 26 weeks) is fetched
+    automatically on top of it, so short presets like --period 1m still
+    have the full BOS/SSL history behind every reportable day.
+
 Output: signals_backtest.csv + signals_backtest.xlsx (Excel with a
         'Signals' sheet containing EVERY signal incl. full score component
         breakdown, and a 'Summary' sheet with win-rate stats + score buckets) and a
         printed win-rate summary, including a score>=70 vs score<70 split.
+
+If most symbols fail to fetch (Yahoo rate-limiting the runner IP), the run
+is a DATA OUTAGE: the summary says so loudly and the process exits non-zero
+so a CI run turns RED instead of a green, meaningless "0 signals".
 """
 
 from __future__ import annotations
@@ -53,6 +62,11 @@ from config import ScanConfig
 from indicators import avg_volume
 from pattern import _score
 from prefilter import passes_prefilter
+
+# exit code when a run was a data outage (same convention as scanner.py:
+# distinct from 1=crash, 2=usage) - a CI run must turn RED, not die green
+# with a meaningless "0 signals"
+EXIT_DATA_OUTAGE = 3
 
 # ---------------------------------------------------------------------------
 # universe (static list of liquid NSE names - the backtest no longer calls
@@ -175,9 +189,16 @@ def rolling_prev_max(a: np.ndarray, w: int) -> np.ndarray:
 
 
 def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
-                    out_rows: list, debug_symbol: str | None = None) -> int:
+                    out_rows: list, debug_symbol: str | None = None,
+                    since: str | None = None) -> int:
     """Run the full pattern on every historical day; append signals.
-    If debug_symbol == sym, prints WHY candidate days are rejected."""
+    If debug_symbol == sym, prints WHY candidate days are rejected.
+
+    `since` (ISO date, optional): only REPORT signals dated on/after it.
+    The bars handed in may reach further back on purpose - the pattern
+    needs min_bars (~26 weeks) of lookback BEFORE the first reportable
+    day - but days older than `since` stay unreported (they belong to the
+    lookback buffer, not the requested analysis window)."""
     o = np.asarray(bars["open"], float)
     h = np.asarray(bars["high"], float)
     l = np.asarray(bars["low"], float)
@@ -198,6 +219,10 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
     # last bar is reported with recent=1 and NaN forward returns (no entry
     # price yet - it is today's still-forming signal).
     for t in range(cfg.min_bars, n):
+        # outside the requested analysis window: this day is only lookback
+        # (cheap string compare - ISO dates sort lexicographically)
+        if since is not None and dates[t] < since:
+            continue
         # ---------------- BOS (mirrors pattern._find_bos) ----------------
         bos_day, bos_style, brk = None, None, None
         best = None
@@ -544,7 +569,8 @@ def main() -> int:
     ap.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--symbols-file", default=None)
     ap.add_argument("--years", type=int, default=None,
-                    help="years of history (overridden by --period)")
+                    help="years of history to REPORT signals from "
+                         "(lookback is fetched on top; overridden by --period)")
     ap.add_argument("--period", choices=["1m", "6m", "1y", "2y", "5y"],
                     default=None,
                     help="preset time period: 1m (1 month), 6m (6 months), "
@@ -562,8 +588,9 @@ def main() -> int:
                     help="print WHY this symbol's candidate days are "
                          "rejected (e.g. --debug-symbol SPORTKING)")
     ap.add_argument("--days", type=int, default=None,
-                    help="override: fetch N calendar days of history "
-                         "(overridden by --period)")
+                    help="analyze the last N calendar days (the pattern's "
+                         "lookback history is fetched automatically on top; "
+                         "overridden by --period)")
     args = ap.parse_args()
 
     if args.source == "dhan":
@@ -612,40 +639,70 @@ def main() -> int:
     if args.limit:
         symbols = symbols[:args.limit]
     period_info = f", period={args.period}" if args.period else ""
-    print(f"source=yfinance universe={len(symbols)} symbols{period_info}, "
-          f"{args.years or (args.days/365):.1f}y window, min_score={cfg.score_threshold}")
 
+    # ---- analysis window vs FETCH window --------------------------------
+    # --period/--days/--years define the window signals are REPORTED from.
+    # The pattern itself needs min_bars (~26 weeks) of history before the
+    # first reportable day, so the fetch window extends the analysis window
+    # by that lookback. Without the buffer every short preset (1m = ~21
+    # bars, 6m = ~124 bars < min_bars=160) fails 100% of symbols as
+    # "no data" and can never report a single signal.
+    analysis_days = args.days if args.days else 365 * (args.years or 5)
+    # min_bars trading days ~= min_bars * 7/5 calendar days (+ margin)
+    lookback_days = int(cfg.min_bars * 7 / 5) + 15
     end = dt.date.today()
-    start = end - dt.timedelta(days=args.days if args.days else (365 * args.years + 30))
+    since_date = end - dt.timedelta(days=analysis_days)
+    since_iso = since_date.isoformat()
+    fetch_start = since_date - dt.timedelta(days=lookback_days)
+
+    print(f"source=yfinance universe={len(symbols)} symbols{period_info}, "
+          f"{analysis_days / 365:.1f}y window (+{lookback_days}d lookback "
+          f"fetched), min_score={cfg.score_threshold}")
 
     rows: list[dict] = []
     errors = 0
+    attempted = 0
+    aborted_outage = False
     t0 = time.time()
 
     pacer = _Pacer(cfg.yf_min_interval)
     for i, sym in enumerate(symbols, 1):
+        attempted = i
         try:
             pacer.wait()
-            bars = _fetch_yfinance(sym, start, end)
+            bars = _fetch_yfinance(sym, fetch_start, end)
             if (bars is None or len(bars.get("close", [])) < cfg.min_bars) \
                     and cfg.yf_retry_delay > 0:
                 # ONE retry after a short pause (transient Yahoo 429s) -
                 # same policy as the live scanner's _YfGate
                 time.sleep(cfg.yf_retry_delay)
                 pacer.wait()
-                bars = _fetch_yfinance(sym, start, end)
+                bars = _fetch_yfinance(sym, fetch_start, end)
             if bars is None or len(bars.get("close", [])) < cfg.min_bars:
                 errors += 1
                 print(f"  {i}/{len(symbols)} {sym:12s} FAIL "
                       f"(yfinance: no data)", flush=True)
-                continue
-            got = backtest_symbol(sym, cfg, bars, rows, args.debug_symbol)
-            print(f"  {i}/{len(symbols)} {sym:12s} "
-                  f"bars={len(bars['close']):4d} signals={got}", flush=True)
+            else:
+                got = backtest_symbol(sym, cfg, bars, rows, args.debug_symbol,
+                                      since=since_iso)
+                print(f"  {i}/{len(symbols)} {sym:12s} "
+                      f"bars={len(bars['close']):4d} signals={got}",
+                      flush=True)
         except Exception as e:  # noqa: BLE001
             errors += 1
             print(f"  {i}/{len(symbols)} {sym:12s} ERROR {str(e)[:70]}",
                   flush=True)
+        # ---- fail fast on a dead data source: if the FIRST
+        #      data_outage_min_symbols symbols ALL failed to fetch, Yahoo is
+        #      not answering this runner - grinding through the rest (2
+        #      paced calls each) only burns 5-10 minutes to reach the same
+        #      outage verdict. Abort now and fail the run loudly.
+        if attempted >= cfg.data_outage_min_symbols and errors == attempted:
+            aborted_outage = True
+            print(f"  fetch dead for all {attempted} symbols so far - "
+                  f"aborting early (skipping the remaining "
+                  f"{len(symbols) - attempted})", flush=True)
+            break
 
     # ---- cooldown: keep only the FIRST signal per symbol within
     #      cooldown_days (backtest-verified: repeats win 30% vs 63%) ----
@@ -681,6 +738,26 @@ def main() -> int:
         write_excel(rows, xlsx)
 
     print_summary(rows, errors, time.time() - t0, cfg)
+
+    # ---- DATA OUTAGE: most symbols fetched NOTHING (Yahoo unreachable /
+    #      rate-limiting this IP). "0 signals" in this state is a lie - the
+    #      backtest was blind. Same policy as the live scanner (see
+    #      scanner.py / the 2026-08-24 silent-outage postmortem): a loud
+    #      ::error:: annotation for the Actions run page plus a non-zero
+    #      exit code so the run turns RED instead of a green empty result.
+    total = attempted
+    outage = (total >= cfg.data_outage_min_symbols
+              and errors >= cfg.data_outage_error_frac * total)
+    if outage:
+        pct = 100.0 * errors / max(total, 1)
+        suffix = " (aborted early)" if aborted_outage else ""
+        print(f"::error title=Backtest data outage::{errors}/{total} symbols "
+              f"failed to fetch ({pct:.0f}%){suffix} - Yahoo Finance "
+              f"unreachable or rate-limiting this IP. '0 signals' is "
+              f"INVALID for this run: rotate the network/retry later.")
+        print(f"ERROR: DATA OUTAGE - {errors}/{total} fetches failed"
+              f"{suffix}; results are not a real backtest.", file=sys.stderr)
+        return EXIT_DATA_OUTAGE
     return 0
 
 

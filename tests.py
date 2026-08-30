@@ -858,6 +858,161 @@ def test_backtest_avg_volume_no_lookahead() -> None:
           f"dates found: {[r['date'] for r in rows]}")
 
 
+def test_backtest_period_presets_fetch_lookahead() -> None:
+    """Regression (2026-08-29 'backtest not working'): --period presets used
+    the ANALYSIS window as the FETCH window, so every short preset failed
+    100% of symbols as 'no data' (1m = ~21 bars, 6m = ~124 bars, both below
+    min_bars=160) and could never report a signal. The fetch window must
+    extend the analysis window by the pattern's lookback (~26 weeks), with
+    signals still reported only from inside the requested window."""
+    print("== backtest period presets fetch the lookback buffer ==")
+    import io
+    import os
+    import tempfile
+    import contextlib
+    import unittest.mock as mock
+    import backtest as bt
+    from demo_data import demo_universe
+
+    _dates, _bars, _sig = demo_universe()["SPORTKING"]
+    good = {k: v for k, v in _bars.items() if k != "symbol"}
+    good["dates"] = list(_dates)
+
+    calls = []
+
+    def fake_fetch(sym, start, end):
+        calls.append((sym, start, end))
+        return good
+
+    tmp = tempfile.mkdtemp()
+    argv = ["--period", "1m", "--limit", "2", "--min-mcap", "0",
+            "--out", os.path.join(tmp, "sig.csv")]
+    out = io.StringIO()
+    with mock.patch.object(bt, "_fetch_yfinance", fake_fetch), \
+            mock.patch.object(bt.sys, "argv", ["backtest.py"] + argv), \
+            contextlib.redirect_stdout(out):
+        rc = bt.main()
+    text = out.getvalue()
+
+    check("main() exits 0 when data is fetchable", rc == 0, f"rc={rc}")
+    check("no symbol failed to fetch (1m window has enough history)",
+          "FAIL" not in text and "ERROR" not in text, text[-400:])
+    check("both symbols were fetched", len(calls) == 2, f"{len(calls)} calls")
+    if calls:
+        _sym, start, end = calls[0]
+        window = (end - start).days
+        # 30d analysis + ~160 trading days (~224 calendar days) of lookback
+        check("fetch window includes the 26-week lookback "
+              "(>= 250 days for --period 1m)",
+              window >= 250, f"window={window}d start={start} end={end}")
+
+
+def test_backtest_symbol_since_window() -> None:
+    """The `since` floor: bars may reach back further than the requested
+    analysis window (lookback), but only days inside the window are
+    reported."""
+    print("== backtest_symbol: `since` restricts reported signals ==")
+    import numpy as np
+    import backtest as bt
+    from config import ScanConfig
+    from demo_data import demo_universe
+
+    cfg = ScanConfig()
+    dates, bars, sig_date = demo_universe()["SPORTKING"]
+    bars2 = {k: np.array(v, float) for k, v in bars.items() if k != "symbol"}
+    bars2["dates"] = list(dates)
+
+    rows = []
+    bt.backtest_symbol("SPORTKING", cfg, bars2, rows, since=None)
+    check("since=None reports the verified signal (unchanged default)",
+          any(r["date"] == sig_date for r in rows),
+          f"{[r['date'] for r in rows]}")
+
+    rows = []
+    bt.backtest_symbol("SPORTKING", cfg, bars2, rows, since="2000-01-01")
+    check("since far in the past still reports the signal",
+          any(r["date"] == sig_date for r in rows),
+          f"{[r['date'] for r in rows]}")
+
+    rows = []
+    import datetime as _dt
+    day_after = (_dt.date.fromisoformat(sig_date)
+                 + _dt.timedelta(days=1))
+    bt.backtest_symbol("SPORTKING", cfg, bars2, rows,
+                       since=day_after.isoformat())
+    check("since = day after the signal reports nothing",
+          len(rows) == 0, f"{[r['date'] for r in rows]}")
+
+
+def test_backtest_data_outage_loud_exit() -> None:
+    """Regression (2026-08-29): a backtest where Yahoo fetches nothing used
+    to exit 0 with a polite '0 signals' - a green CI run that hid the outage
+    (same class of bug as the 2026-08-24 scanner outage). A dead data source
+    must abort early, print a ::error:: annotation and exit non-zero; a
+    partially failing run is NOT an outage and still exits 0. Also keeps the
+    old workflow's --source/--no-cache/--resume flags parsing (the 18:38
+    exit-code-2 failure)."""
+    print("== backtest data outage: early abort + non-zero exit ==")
+    import io
+    import os
+    import tempfile
+    import contextlib
+    import unittest.mock as mock
+    import backtest as bt
+
+    class FastCfg(bt.ScanConfig):
+        def __init__(self):
+            super().__init__()
+            self.yf_min_interval = 0.0     # no pacing in tests
+            self.yf_retry_delay = 0.0      # no retry sleeps
+            self.data_outage_min_symbols = 3  # abort early after 3 fails
+
+    tmp = tempfile.mkdtemp()
+
+    # ---- total outage: every fetch fails ------------------------------
+    out = io.StringIO()
+    argv = ["--source", "dhan", "--no-cache",        # old workflow flags
+            "--years", "2", "--limit", "30", "--min-mcap", "0",
+            "--out", os.path.join(tmp, "none.csv")]
+    with mock.patch.object(bt, "ScanConfig", FastCfg), \
+            mock.patch.object(bt, "_fetch_yfinance",
+                              lambda *a, **k: None), \
+            mock.patch.object(bt.sys, "argv", ["backtest.py"] + argv), \
+            contextlib.redirect_stdout(out):
+        rc = bt.main()
+    text = out.getvalue()
+    check("dead source exits with the data-outage code (3)",
+          rc == bt.EXIT_DATA_OUTAGE, f"rc={rc}")
+    check("::error:: annotation for the Actions run page",
+          "::error title=Backtest data outage::" in text, text[-300:])
+    check("aborted early instead of grinding all 30 symbols",
+          "aborting early" in text and "30/30" not in text, text[-300:])
+    check("old workflow flags (--source/--no-cache) still parse",
+          "NOTICE: --source dhan is deprecated" in text, text[:200])
+
+    # ---- partial failure (1 of 6) is NOT an outage ---------------------
+    from demo_data import demo_universe
+    _dates, _bars, _sig = demo_universe()["SPORTKING"]
+    good = {k: v for k, v in _bars.items() if k != "symbol"}
+    good["dates"] = list(_dates)
+
+    def flaky_fetch(sym, start, end):
+        return None if sym == "RELIANCE" else good
+
+    out = io.StringIO()
+    argv = ["--years", "2", "--limit", "6", "--min-mcap", "0",
+            "--out", os.path.join(tmp, "partial.csv")]
+    with mock.patch.object(bt, "ScanConfig", FastCfg), \
+            mock.patch.object(bt, "_fetch_yfinance", flaky_fetch), \
+            mock.patch.object(bt.sys, "argv", ["backtest.py"] + argv), \
+            contextlib.redirect_stdout(out):
+        rc = bt.main()
+    check("1/6 failures is a healthy run, not an outage (exit 0)",
+          rc == 0, f"rc={rc}")
+    check("partial run did NOT abort early", "aborting early"
+          not in out.getvalue(), out.getvalue()[-200:])
+
+
 def test_tracker() -> None:
     print("== signal tracking sheet ==")
     import os, tempfile, datetime as dt
@@ -1166,6 +1321,9 @@ def main() -> int:
     test_aci_26w_proximity()
     test_backtest_finds_verified_stocks()
     test_backtest_avg_volume_no_lookahead()
+    test_backtest_period_presets_fetch_lookahead()
+    test_backtest_symbol_since_window()
+    test_backtest_data_outage_loud_exit()
     test_tracker()
     test_run_live_unpack()
     test_cross_run_cooldown_and_summary()
