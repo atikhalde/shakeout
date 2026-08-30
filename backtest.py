@@ -190,7 +190,8 @@ def rolling_prev_max(a: np.ndarray, w: int) -> np.ndarray:
 
 def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
                     out_rows: list, debug_symbol: str | None = None,
-                    since: str | None = None) -> int:
+                    since: str | None = None,
+                    stats: dict | None = None) -> int:
     """Run the full pattern on every historical day; append signals.
     If debug_symbol == sym, prints WHY candidate days are rejected.
 
@@ -198,7 +199,12 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
     The bars handed in may reach further back on purpose - the pattern
     needs min_bars (~26 weeks) of lookback BEFORE the first reportable
     day - but days older than `since` stay unreported (they belong to the
-    lookback buffer, not the requested analysis window)."""
+    lookback buffer, not the requested analysis window).
+
+    `stats` (optional dict): per-stage rejection counts so the summary can
+    explain WHY a run produced few/zero signals instead of staying silent
+    (the 2026-08 silent "0 signals" runs had no way to tell a tight market
+    apart from a broken data path)."""
     o = np.asarray(bars["open"], float)
     h = np.asarray(bars["high"], float)
     l = np.asarray(bars["low"], float)
@@ -207,10 +213,20 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
     dates = bars["dates"]
     n = len(c)
     if n < cfg.min_bars:
+        if stats is not None:
+            stats["too_few_bars"] = stats.get("too_few_bars", 0) + 1
         return 0
 
     prev26 = rolling_prev_max(h, cfg.bos_lookback_26w)
     prev45 = rolling_prev_max(h, cfg.bos_lookback_swing)
+
+    def rej(stage: str, sub: str = "") -> None:
+        if stats is None:
+            return
+        stats[stage] = stats.get(stage, 0) + 1
+        if sub:
+            key = f"{stage}:{sub}"
+            stats[key] = stats.get(key, 0) + 1
 
     found = 0
     dbg = debug_symbol == sym
@@ -223,6 +239,8 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         # (cheap string compare - ISO dates sort lexicographically)
         if since is not None and dates[t] < since:
             continue
+        if stats is not None:
+            stats["candidates"] = stats.get("candidates", 0) + 1
         # ---------------- BOS (mirrors pattern._find_bos) ----------------
         bos_day, bos_style, brk = None, None, None
         best = None
@@ -237,6 +255,7 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         if best is None:
             if dbg and dates[t] >= "2026-07-20":
                 print(f"    [{dates[t]}] no BOS in window")
+            rej("bos", "no_bos")
             continue
         bos_day, bos_style, brk = best
 
@@ -244,18 +263,21 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         if bos_style == "swing":
             h26 = prev26[t]
             if np.isnan(h26) or h26 <= 0:
+                rej("bos", "swing_no_h26")
                 continue
             if np.max(h[bos_day:t + 1]) < h26 * cfg.swing_26w_proximity:
                 if dbg and dates[t] >= "2026-07-20":
                     prox = np.max(h[bos_day:t + 1]) / h26 * 100
                     print(f"    [{dates[t]}] swing BOS but peak {prox:.1f}% "
                           f"of 26W high (need {cfg.swing_26w_proximity*100:.0f}%)")
+                rej("bos", "swing_proximity")
                 continue
 
         # ------------------------- flush --------------------------------
         pk = bos_day + int(np.argmax(h[bos_day:t + 1]))
         fl = bos_day + int(np.argmin(l[bos_day:t + 1]))
         if fl <= pk:
+            rej("flush", "order")
             continue
         peak = float(h[pk])
         flush_low = float(l[fl])
@@ -264,28 +286,34 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
             if dbg and dates[t] >= "2026-07-20":
                 print(f"    [{dates[t]}] flush drop {drop*100:.1f}% < "
                       f"{cfg.flush_min_drop*100:.0f}%")
+            rej("flush", "drop")
             continue
         reds = [(c[i - 1] - c[i]) / c[i - 1] for i in range(pk + 1, t + 1)
                 if c[i] < c[i - 1]]
         if not reds or max(reds) < cfg.flush_red_day_min:
+            rej("flush", "no_red")
             continue
         if t - fl > cfg.flush_max_age:
+            rej("flush", "age")
             continue
 
         # -------------------------- SSL --------------------------------
         lo = max(0, bos_day - cfg.ssl_pre_lookback)
         ssl = float(np.min(l[lo:bos_day]))
         if ssl <= 0:
+            rej("ssl", "none")
             continue
         ratio = flush_low / ssl
         if ratio > 1 + cfg.ssl_tol_up or ratio < 1 - cfg.ssl_tol_dn:
             if dbg and dates[t] >= "2026-07-20":
                 print(f"    [{dates[t]}] flush low {flush_low:.1f} vs SSL "
                       f"{ssl:.1f} ({ratio*100:.1f}%) outside tolerance")
+            rej("ssl", "tolerance")
             continue
 
         # ------------------------- hold --------------------------------
         if float(np.min(c[fl:t + 1])) <= ssl:
+            rej("hold", "below_ssl")
             continue
 
         # ---------------------- reversal day ---------------------------
@@ -294,23 +322,28 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
             if dbg and dates[t] >= "2026-07-20":
                 print(f"    [{dates[t]}] last candle not green "
                       f"(O {o[t]:.1f} C {c[t]:.1f})")
+            rej("candle", "not_green")
             continue
         if (c[t] - o[t]) / rng < cfg.body_ratio_min:
             if dbg and dates[t] >= "2026-07-20":
                 print(f"    [{dates[t]}] body ratio {(c[t]-o[t])/rng:.2f} < "
                       f"{cfg.body_ratio_min}")
+            rej("candle", "body_ratio")
             continue
         if c[t] < c[t - 1] * (1 + cfg.bounce_min):
             if dbg and dates[t] >= "2026-07-20":
                 print(f"    [{dates[t]}] bounce {(c[t]/c[t-1]-1)*100:.1f}% < "
                       f"{cfg.bounce_min*100:.0f}%")
+            rej("candle", "bounce")
             continue
         if c[t] < ssl * cfg.near_ssl_close_min:
+            rej("candle", "near_ssl")
             continue
         if c[t] >= peak:
             if dbg and dates[t] >= "2026-07-20":
                 print(f"    [{dates[t]}] close {c[t]:.1f} >= peak {peak:.1f} "
                       f"(too late)")
+            rej("candle", "too_late")
             continue
 
         # ------------------- prefilter (same as live) ------------------
@@ -321,6 +354,19 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         if not ok:
             if debug_symbol and sym == debug_symbol:
                 print(f"    [{dates[t]}] prefilter REJECT: {why}")
+            if stats is not None:
+                for prefix, name in (
+                        ("close", "100.html_close"),
+                        ("daily", "red_day"),
+                        ("RSI", "rsi"),
+                        ("MACD", "macd"),
+                        ("insufficient", "history"),
+                        ("", "other")):
+                    if why.startswith(prefix):
+                        stats[f"prefilter:{name}"] = \
+                            stats.get(f"prefilter:{name}", 0) + 1
+                        break
+                stats["prefilter"] = stats.get("prefilter", 0) + 1
             continue
 
         # ------------------- filters (same as live) -------------------
@@ -328,6 +374,7 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         if c[t] < cfg.min_price:
             if dbg and dates[t] >= "2026-07-20":
                 print(f"    [{dates[t]}] price {c[t]:.1f} < {cfg.min_price}")
+            rej("min_price")
             continue
         # avg_volume: reject illiquid stocks
         # CRITICAL: slice to day t (v[:t+1]) like the prefilter above -
@@ -341,6 +388,7 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
             if dbg and dates[t] >= "2026-07-20":
                 print(f"    [{dates[t]}] avg_volume {avg_vol:,.0f} < "
                       f"{cfg.min_avg_volume:,.0f}")
+            rej("avg_volume")
             continue
 
         # --------------------- score (same formula) --------------------
@@ -354,6 +402,7 @@ def backtest_symbol(sym: str, cfg: ScanConfig, bars: dict,
         }
         score, _parts = _score(sig_tmp, {"close": c[:t + 1]}, cfg)
         if score < cfg.score_threshold:
+            rej("score")
             continue
         # flatten the score components (needed for the last-bar branch too)
         comp = {name: round(v, 1) for name, (v, _m) in (_parts or {}).items()}
@@ -665,6 +714,10 @@ def main() -> int:
     aborted_outage = False
     t0 = time.time()
 
+    stats: dict = {}
+    bar_counts: list[int] = []
+    fetched_ok = 0
+
     pacer = _Pacer(cfg.yf_min_interval)
     for i, sym in enumerate(symbols, 1):
         attempted = i
@@ -683,8 +736,10 @@ def main() -> int:
                 print(f"  {i}/{len(symbols)} {sym:12s} FAIL "
                       f"(yfinance: no data)", flush=True)
             else:
+                fetched_ok += 1
+                bar_counts.append(len(bars["close"]))
                 got = backtest_symbol(sym, cfg, bars, rows, args.debug_symbol,
-                                      since=since_iso)
+                                      since=since_iso, stats=stats)
                 print(f"  {i}/{len(symbols)} {sym:12s} "
                       f"bars={len(bars['close']):4d} signals={got}",
                       flush=True)
@@ -738,6 +793,30 @@ def main() -> int:
         write_excel(rows, xlsx)
 
     print_summary(rows, errors, time.time() - t0, cfg)
+
+    # ---- zero-signal diagnostics: say WHY (the silent-empty fix) ----
+    # A run that fetches healthy data but reports 0 signals is a legitimate
+    # outcome, but SHOULD say which stage filtered everything out so the
+    # next run is not a blind re-run of a broken or mis-tuned pipeline.
+    if stats.get("candidates"):
+        groups = ("bos", "flush", "ssl", "hold", "candle", "prefilter",
+                  "min_price", "avg_volume", "score", "too_few_bars")
+        top = sorted(((k, v) for k, v in stats.items()
+                      if k in groups or k.startswith("prefilter:")),
+                     key=lambda kv: -kv[1])
+        detail = " | ".join(f"{k}={v}" for k, v in top)
+        if bar_counts:
+            bar_counts.sort()
+            med = bar_counts[len(bar_counts) // 2]
+            fetch = (f"fetched={fetched_ok}/{attempted} "
+                     f"bars(med={med},min={bar_counts[0]},max={bar_counts[-1]})")
+        else:
+            fetch = f"fetched=0/{attempted}"
+        print(f"\nREJECTION STATS: candidates={stats.get('candidates', 0)} "
+              f"signals={len(rows)} | {detail} | {fetch}")
+        if not rows and not outage:
+            print(f"::warning title=Backtest 0 signals::0 signals but the data "
+                  f"looks healthy ({fetch}). Candidate-day outcomes: {detail}")
 
     # ---- DATA OUTAGE: most symbols fetched NOTHING (Yahoo unreachable /
     #      rate-limiting this IP). "0 signals" in this state is a lie - the
