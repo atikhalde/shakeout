@@ -1173,6 +1173,79 @@ def test_tracker() -> None:
     check("r5 recorded", rows[0]["r5"] != "")
 
 
+def test_ssl_touch_detector() -> None:
+    """Add-on: the SSL-zone TOUCH fires on the flush day (the moment price
+    dips INTO the SSL level) BEFORE the reversal candle confirms, and stays
+    silent on the reversal day and after the big move."""
+    print("== SSL-zone touch detector (early-warning add-on) ==")
+    from pattern import detect_ssl_touch, detect_setup
+
+    # SPORTKING: flush low 194.99 enters SSL 194.6 on 07-30 -> TOUCH that day,
+    # NOT on the reversal day 07-31.
+    dates, bars, _ = demo_universe()["SPORTKING"]
+    t = [i for i, d in enumerate(dates) if d == "2026-07-30"][0]
+    sl = {k: v[:t + 1] for k, v in bars.items() if k != "symbol"}
+    sl["symbol"] = "SPORTKING"
+    touch = detect_ssl_touch(sl, dates[:t + 1], ScanConfig())
+    check("touch fires on the flush day", touch is not None, f"{touch}")
+    if touch:
+        check("touch signal_type is ssl_touch", touch.get("signal_type") == "ssl_touch")
+        check("touch day == flush day", str(touch["signal_date"])[:10] == "2026-07-30")
+        check("touch carries SSL + low", touch["ssl"] > 0 and touch["flush_low"] < touch["peak"])
+    # the reversal detector must NOT fire on the same flush day (no green bar yet)
+    check("no reversal signal on the flush day",
+          detect_setup(sl, dates[:t + 1], ScanConfig()) is None)
+
+    # On the reversal day (07-31) the touch must NOT fire (t != flush day).
+    d0, b0, _ = demo_universe()["SPORTKING"]
+    check("touch does not fire on the reversal day",
+          detect_ssl_touch(b0, d0, ScanConfig()) is None)
+
+    # After the big move (NEG_POST_MOVE) there is no fresh touch.
+    dneg, bneg, _ = demo_universe()["NEG_POST_MOVE"]
+    check("touch does not fire after the big move",
+          detect_ssl_touch(bneg, dneg, ScanConfig()) is None)
+
+
+def test_ssl_touch_format() -> None:
+    """The SSL-zone TOUCH Telegram message must be a valid, lighter block that
+    still names the stock and shows the SSL level, with no raw '<' (the old
+    signal had 'still < peak' which broke Telegram's HTML parser)."""
+    print("== SSL-zone touch telegram format ==")
+    from pattern import detect_ssl_touch
+
+    dates, bars, _ = demo_universe()["SPORTKING"]
+    t = [i for i, d in enumerate(dates) if d == "2026-07-30"][0]
+    sl = {k: v[:t + 1] for k, v in bars.items() if k != "symbol"}
+    sl["symbol"] = "SPORTKING"
+    touch = detect_ssl_touch(sl, dates[:t + 1], ScanConfig())
+    msg = TelegramNotifier.format_ssl_touch(touch)
+    check("touch msg names the stock", "SPORTKING" in msg)
+    check("touch msg has the header", "SSL-ZONE TOUCH" in msg)
+    check("touch msg shows the SSL level", "194.60" in msg)
+    check("touch msg is valid html (no unescaped <)",
+          "<b>" in msg and "< peak" not in msg and msg.count("<") == msg.count(">"))
+
+
+def test_ssl_touch_separate_cooldown() -> None:
+    """The touch alert is a SEPARATE alert type: it logs to its own tracker
+    file, so a touch never suppresses the later reversal alert (and a reversal
+    never suppresses a touch) -- everything stays 'intact'."""
+    print("== SSL-touch cooldown is independent of the reversal cooldown ==")
+    import os, tempfile
+    from tracker import log_signal, recently_alerted
+
+    sig_file = os.path.join(tempfile.mkdtemp(), "signals_tracker.csv")
+    touch_file = os.path.join(tempfile.mkdtemp(), "ssl_touch_tracker.csv")
+    log_signal({"symbol": "XYZ", "signal_date": "2026-09-02", "score": 60,
+                "last_close": 100.0, "stop_level": 95.0, "target_level": 0.0,
+                "rr": 0.0, "vol_surge": 1.0}, touch_file)
+    check("touch is in its own tracker",
+          recently_alerted("XYZ", "2026-09-02", 15, touch_file) is True)
+    check("touch does NOT hit the reversal tracker",
+          recently_alerted("XYZ", "2026-09-02", 15, sig_file) is False)
+
+
 def test_negatives() -> None:
     print("== negative cases (must NOT flag) ==")
     cfg = ScanConfig()
@@ -1454,6 +1527,9 @@ def main() -> int:
     test_backtest_data_outage_loud_exit()
     test_backtest_yfinance_disk_cache()
     test_tracker()
+    test_ssl_touch_detector()
+    test_ssl_touch_format()
+    test_ssl_touch_separate_cooldown()
     test_run_live_unpack()
     test_cross_run_cooldown_and_summary()
     test_fail_fast_dhan_to_yfinance()

@@ -231,6 +231,130 @@ def detect_setup(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------
+# SSL-zone touch detector (early-warning add-on)
+# --------------------------------------------------------------------------
+
+def detect_ssl_touch(bars: dict, dates: list, cfg: ScanConfig) -> Optional[dict]:
+    """
+    Detect a FRESH SSL-zone TOUCH: the moment price dips INTO the sell-side
+    liquidity level after the BOS (the 'flush' step 3), BEFORE the reversal
+    candle confirms (step 5). This is the early-warning half of the setup.
+
+    Whereas `detect_setup` demands a strong green reversal candle and therefore
+    fires only AFTER the bounce, `detect_ssl_touch` fires on the day the low
+    first enters the SSL zone, so the user can watch the level while the
+    reversal is still deciding. It shares the BOS / peak / flush / SSL anatomy
+    but deliberately does NOT require the green reversal bar, the bounce, or
+    the closes-held-above-SSL confirmation -- those belong to the reversal
+    alert (which still fires exactly as before).
+
+    Returns a signal dict with signal_type='ssl_touch', or None.
+    """
+    o, h, l, c = bars["open"], bars["high"], bars["low"], bars["close"]
+    v = bars.get("volume", np.zeros(len(c)))
+    n = len(c)
+    if n < cfg.min_bars:
+        return None
+    t = n - 1  # candidate touch day = last completed bar
+
+    # ------------------------------------------------------------- 1. BOS
+    bos = _find_bos(h, t, cfg)
+    if bos is None:
+        return None
+    bos_day, bos_style, break_level = bos
+
+    # 1b) swing-style BOS must reach the 26-week-high zone (same guard)
+    if bos_style == "swing":
+        h26w = _prev_highs(h, cfg.bos_lookback_26w)[t]
+        if not np.isnan(h26w) and h26w > 0:
+            post_bos_peak = float(np.max(h[bos_day: t + 1]))
+            if post_bos_peak < h26w * cfg.swing_26w_proximity:
+                return None
+
+    # ------------------------------------------------------------- 2. flush
+    peak_day = int(np.argmax(h[bos_day: t + 1])) + bos_day
+    flush_day = int(np.argmin(l[bos_day: t + 1])) + bos_day
+    peak = float(h[peak_day])
+    flush_low = float(l[flush_day])
+
+    if flush_day <= peak_day:            # the touch must come AFTER the peak
+        return None
+    drop = (peak - flush_low) / peak
+    if drop < cfg.flush_min_drop:        # not a real shakeout flush
+        return None
+
+    # ------------------------------------------------------------- 3. SSL
+    lo = max(0, bos_day - cfg.ssl_pre_lookback)
+    ssl = float(np.min(l[lo: bos_day]))
+    if ssl <= 0:
+        return None
+
+    # ---- THE TOUCH: today's low first enters the SSL zone ----
+    #   The flush low must be the CURRENT bar (a fresh touch) and within the
+    #   same tolerance band the reversal detector uses for the SSL precision.
+    if t != flush_day:
+        return None
+    ratio = flush_low / ssl
+    if ratio > 1 + cfg.ssl_tol_up or ratio < 1 - cfg.ssl_tol_dn:
+        return None
+
+    # at least one clearly red session in the flush window (real selling)
+    reds = []
+    for i in range(peak_day + 1, t + 1):
+        if c[i] < c[i - 1]:
+            reds.append((c[i - 1] - c[i]) / c[i - 1])
+    if not reds or max(reds) < cfg.flush_red_day_min:
+        return None
+
+    # still BEFORE the big move (close has not reclaimed the peak)
+    if c[t] >= peak:
+        return None
+
+    # ------------------------------------------------------------- filters
+    if c[t] < cfg.min_price:
+        return None
+    vols = v if not bars.get("partial_last") or len(v) < 2 else v[:-1]
+    if avg_volume(vols, cfg.volume_lookback) < cfg.min_avg_volume:
+        return None
+
+    # ------------------------------------------------------------- assemble
+    rng = h[t] - l[t]
+    signal = {
+        "symbol": bars.get("symbol", "?"),
+        "signal_type": "ssl_touch",
+        "signal_date": dates[t],
+        "bos_date": dates[bos_day],
+        "bos_style": bos_style,
+        "break_level": break_level,
+        "peak": peak,
+        "peak_date": dates[peak_day],
+        "flush_low": flush_low,
+        "flush_date": dates[flush_day],
+        "flush_drop_pct": drop * 100.0,
+        "ssl": ssl,
+        "last_close": float(c[t]),
+        "last_open": float(o[t]),
+        "last_high": float(h[t]),
+        "last_low": float(l[t]),
+        "bounce_pct": (c[t] - c[t - 1]) / c[t - 1] * 100.0,
+        "body_ratio": (c[t] - o[t]) / max(rng, 1e-9),
+        "retrace_pct": (peak - flush_low) / max(peak - ssl, 1e-9) * 100.0,
+        "days_since_bos": t - bos_day,
+        "stop_level": ssl,                     # structural stop = below SSL
+        "target_level": 0.0,                   # no trade plan on a touch
+        "rr": 0.0,
+        "vol_surge": float(
+            v[t] / max(float(np.mean(v[t - 20:t])) if t >= 20
+                       else float(np.mean(v[:t])), 1e-9)
+        ),
+        "score": 0.0,
+    }
+    signal["score"], signal["score_parts"] = _score(signal, bars, cfg)
+    signal["strong_reversal"] = False
+    return signal
+
+
+# --------------------------------------------------------------------------
 # Scoring (0..100)
 # --------------------------------------------------------------------------
 

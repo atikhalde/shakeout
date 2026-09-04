@@ -158,6 +158,17 @@ Every signal arrives on Telegram like this:
 ⏳ Close ₹201.44 still < peak ₹219.03 → big move not fired yet
 ```
 
+> 📌 **SSL-ZONE TOUCH alert (early-warning).** In addition to the reversal
+> PATTERN SIGNAL, the scanner also sends an **earlier** `🟦 SSL-ZONE TOUCH`
+> message the moment price dips **into** the SSL level — the flush day, i.e.
+> *before* the reversal candle confirms. It's deliberately lighter (BOS /
+> peak / flush / SSL level only — no trade plan) and is a "watch this level"
+> heads-up: the full PATTERN SIGNAL still follows if the close holds above SSL
+> and a reversal candle prints. It fires on the flush day, runs in both the
+> daily and the `--intraday` scans, and uses a **separate cooldown/tracker**
+> (`ssl_touch_tracker.csv`) so a touch never suppresses the later reversal
+> alert for the same stock.
+
 `.env` is gitignored, so your tokens are never committed.
 
 ## ☁️ Run daily in the cloud — GitHub Actions (no PC needed)
@@ -497,6 +508,9 @@ python scanner.py --mode live --backtest --backtest-days 90 --limit 200
 | `body_ratio_min` | 0.25 | min green-body strength on reversal day |
 | `min_avg_volume` | 200k | liquidity filter |
 | `score_threshold` | 55 | min score to report |
+| `ssl_touch_alerts` | `True` | emit the early **SSL-ZONE TOUCH** alert (see below) |
+| `ssl_touch_tracker_file` | `ssl_touch_tracker.csv` | separate cooldown/tracking for touch alerts |
+| `ssl_touch_cooldown_days` | 15 | cooldown window for touch alerts |
 
 ## File map
 
