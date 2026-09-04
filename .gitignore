@@ -18,7 +18,9 @@ logs/
 results_*.csv
 backtest_*.csv
 signals_tracker.csv
+ssl_touch_tracker.csv
 signals_*.csv
+*.touches.csv
 
 # ---- editors / OS ----
 .DS_Store

@@ -79,6 +79,20 @@ class ScanConfig:
     body_ratio_min: float = 0.25     # (close-open)/(high-low) >= 0.25 (strong green)
     near_ssl_close_min: float = 1.005  # signal close must be >= SSL * this
 
+    # -------------------------------------------------------- SSL-touch alert
+    # EARLY-WARNING alert (add-on): fire the moment price dips INTO the SSL
+    # zone -- the 'flush' step -- BEFORE the reversal candle confirms. This is
+    # distinct from the reversal PATTERN SIGNAL: it is a "watch the level"
+    # heads-up, so the user sees price approaching the SSL while it is still
+    # deciding whether to reverse.
+    #   - detects on the flush day itself (t == the bar whose low enters SSL)
+    #   - separate tracker/cooldown so a touch does NOT suppress the later
+    #     reversal alert for the same stock (everything stays "intact")
+    #   - runs in both the daily EOD and --intraday scans
+    ssl_touch_alerts: bool = True
+    ssl_touch_tracker_file: str = "ssl_touch_tracker.csv"
+    ssl_touch_cooldown_days: int = 15
+
     # -------------------------------------------------------------- scoring
     # Trade threshold. Backtest: score>=70 -> 25% big-move rate vs 18% at 60.
     # The 3 verified stocks scored 77-87 - all comfortably above 70.

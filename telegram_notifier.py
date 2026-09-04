@@ -172,6 +172,39 @@ class TelegramNotifier:
                 f"flush to SSL zone (no close below) → strong green reversal "
                 f"candle, still below peak.{tail}")
 
+    @staticmethod
+    def format_ssl_touch(sig: dict) -> str:
+        """Distinct, lighter 'SSL ZONE TOUCH' alert (early-warning heads-up).
+        Deliberately short: BOS / peak / flush / SSL level. No trade plan or
+        score breakdown -- the full reversal PATTERN SIGNAL still fires later
+        if the setup holds."""  # noqa: E501
+        s = sig
+        live = bool(s.get("intraday"))
+        header = ("🟦 <b>LIVE SSL-ZONE TOUCH</b> (market open) — {sym}"
+                  if live else "🟦 <b>SSL-ZONE TOUCH</b> — {sym}")
+        note = ("\n⚠️ <i>Intraday — the daily candle is still forming; the "
+                "SSL level is being tested right now.</i>" if live else "")
+        msg = (
+            header +
+            " <i>(daily timeframe)</i>\n"
+            "📅 <b>{date}</b> — price dipped INTO the SSL zone\n"
+            "🔓 BOS: {bos} ({style}) — broke ₹{brk:.2f}\n"
+            "🏔 Peak: ₹{peak:.2f} ({peak_d})\n"
+            "📉 Flush: −{drop:.1f}% → today's low ₹{low:.2f}\n"
+            "💧 <b>SSL zone: ₹{ssl:.2f}</b>\n"
+            "👀 <b>Watch this level</b> — if the close holds above SSL and a "
+            "strong green reversal candle prints, a full PATTERN SIGNAL follows.\n"
+            "<i>Early-warning touch alert — not a confirmed setup.</i>"
+        ).format(
+            sym=s["symbol"], date=TelegramNotifier._d(s["signal_date"]),
+            bos=TelegramNotifier._d(s["bos_date"]), style=s["bos_style"],
+            brk=s["break_level"], peak=s["peak"],
+            peak_d=TelegramNotifier._d(s["peak_date"]),
+            drop=s["flush_drop_pct"], low=s["flush_low"],
+            ssl=s["ssl"],
+        )
+        return msg + note
+
     # ----------------------------------------------------------- batch helpers
     def send_data_outage(self, text: str) -> bool:
         """A data outage is NOT a quiet day: when most symbols fail to fetch
@@ -193,4 +226,26 @@ class TelegramNotifier:
             time.sleep(0.3)  # be gentle with Telegram's limits
         if self.send(self.format_summary(len(signals), scope, stats)):
             sent += 1
+        return sent
+
+    def send_ssl_touches(self, touches: list[dict], scope: str = "NSE universe",
+                         stats: str = "") -> int:
+        """Send one 'SSL ZONE TOUCH' message per touch + a short summary.
+        Returns # messages sent. Distinct from send_signals so the touch
+        alerts stay clearly separate from the reversal PATTERN SIGNALS."""
+        sent = 0
+        for t in sorted(touches, key=lambda s: -s["score"]):
+            if self.send(self.format_ssl_touch(t)):
+                sent += 1
+            time.sleep(0.3)
+        if touches:
+            summary = (f"🔍 <b>SSL touch scan complete</b> ({scope})\n"
+                       f"{len(touches)} SSL-zone "
+                       f"{'touch' if len(touches) == 1 else 'touches'} flagged.\n"
+                       f"<i>Early warning only — a full PATTERN SIGNAL fires if "
+                       f"the close holds above SSL and a reversal candle prints.</i>")
+            if stats:
+                summary += f"\n⚙️ {stats}"
+            if self.send(summary):
+                sent += 1
         return sent

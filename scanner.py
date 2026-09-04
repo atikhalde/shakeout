@@ -9,6 +9,11 @@ big momentum move - the exact setup seen in:
     BAJFINANCE 27-Jul-2026  (then +8% by 31-Jul)
     SPR_AUTO   27-Jul-2026  (4523 line broken on 03-Aug)
 
+It ALSO emits an EARLIER "SSL-ZONE TOUCH" alert the moment price dips INTO the
+sell-side liquidity (SSL) level on the flush day (before the reversal candle
+confirms) -- a separate, lighter early-warning message (see
+`config.ssl_touch_alerts` / `pattern.detect_ssl_touch`).
+
 Usage:
     # demo mode (built-in test data, no API needed):
     python scanner.py --mode demo
@@ -37,7 +42,7 @@ import numpy as np
 
 from config import ScanConfig
 from env_loader import load_env
-from pattern import detect_setup
+from pattern import detect_setup, detect_ssl_touch
 from prefilter import load_mcap, mcap_filter, passes_prefilter
 from telegram_notifier import TelegramNotifier
 from tracker import log_signal, recently_alerted, update_open
@@ -47,6 +52,10 @@ TABLE_FIELDS = ["rank", "symbol", "score", "signal_date", "last_close",
                 "bos_date", "bos_style", "break_level", "peak", "flush_low",
                 "flush_date", "flush_drop%", "ssl", "min_close_after_ssl",
                 "reversal_bounce%", "retrace%"]
+
+TOUCH_TABLE_FIELDS = ["rank", "symbol", "signal_date", "last_close",
+                      "bos_date", "bos_style", "peak", "flush_low",
+                      "flush_date", "flush_drop%", "ssl"]
 
 # Filled by run_live after every scan; main() reads it to decide the exit
 # code (a data outage must turn the CI run RED, not green-and-silent).
@@ -107,6 +116,42 @@ def _print_table(rows: list[dict]) -> None:
     print()
 
 
+def _print_touches(touches: list[dict]) -> None:
+    """Console summary of the SSL-zone TOUCH alerts (early-warning heads-up,
+    separate from the reversal signal table)."""
+    if not touches:
+        return
+    print()
+    print("  SSL-ZONE TOUCHES (early warning — watch the level):")
+    for t in sorted(touches, key=lambda s: -s["score"]):
+        print(f"  · {t['symbol']:12s} {str(t['signal_date'])[:10]}  "
+              f"low {t['flush_low']:.1f}  SSL {t['ssl']:.1f}  "
+              f"flush −{t['flush_drop_pct']:.1f}%  "
+              f"BOS {str(t['bos_date'])[:10]}")
+    print()
+
+
+def _write_touches_csv(touches: list[dict], path: str) -> None:
+    """Write the SSL-zone TOUCH alerts to their own CSV (sidecar next to the
+    signals CSV) so a run that fired touches leaves verifiable evidence."""
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=TOUCH_TABLE_FIELDS)
+        w.writeheader()
+        for i, t in enumerate(touches, 1):
+            w.writerow({
+                "rank": i, "symbol": t["symbol"],
+                "signal_date": t["signal_date"],
+                "last_close": round(t["last_close"], 2),
+                "bos_date": t["bos_date"], "bos_style": t["bos_style"],
+                "peak": round(t["peak"], 2),
+                "flush_low": round(t["flush_low"], 2),
+                "flush_date": t["flush_date"],
+                "flush_drop%": round(t["flush_drop_pct"], 1),
+                "ssl": round(t["ssl"], 2),
+            })
+    print(f"wrote {len(touches)} SSL-touch rows -> {path}")
+
+
 def _write_csv(rows: list[dict], path: str) -> None:
     # ALWAYS write the file, even with 0 signals: a quiet day used to
     # produce no output at all, which made the Actions upload step warn
@@ -147,6 +192,56 @@ def _append_step_summary(lines: list[str]) -> None:
             f.write("\n".join(lines) + "\n\n")
     except OSError:
         pass
+
+
+def _apply_cooldowns(signals: list[dict], cooldown_days: int,
+                     tracker_file: str, use_tracker: bool = True
+                     ) -> tuple[list[dict], int, int]:
+    """Apply the WITHIN-run dedup (same symbol re-firing within the cooldown
+    window) and the CROSS-RUN tracker-backed cooldown (a symbol alerted on a
+    previous run must not re-alert while the same bar is still served).
+
+    Returns (kept, within_dropped, cross_dropped).
+
+    Shared by the reversal PATTERN SIGNALS and the SSL-zone TOUCH alerts so
+    both use identical cooldown semantics -- but with SEPARATE tracker files,
+    so a touch does not suppress the later reversal signal (and vice versa).
+    """
+    within_dropped = 0
+    if cooldown_days > 0 and signals:
+        signals.sort(key=lambda s: (s["symbol"], str(s["signal_date"])[:10]))
+        deduped, last_by_sym = [], {}
+        for s in signals:
+            sym = s["symbol"]
+            date_s = str(s["signal_date"])[:10]
+            if sym in last_by_sym:
+                try:
+                    import datetime as _dt
+                    gap = (_dt.date.fromisoformat(date_s)
+                           - _dt.date.fromisoformat(last_by_sym[sym])).days
+                    if gap <= cooldown_days:
+                        continue
+                except ValueError:
+                    pass
+            last_by_sym[sym] = date_s
+            deduped.append(s)
+        within_dropped = len(signals) - len(deduped)
+        signals = deduped
+
+    cross_dropped = 0
+    if cooldown_days > 0 and use_tracker and signals:
+        kept = []
+        for s in signals:
+            try:
+                if recently_alerted(s["symbol"], str(s["signal_date"])[:10],
+                                    cooldown_days, tracker_file):
+                    cross_dropped += 1
+                    continue
+            except Exception:  # noqa: BLE001  (bad tracker file -> alert anyway)
+                pass
+            kept.append(s)
+        signals = kept
+    return signals, within_dropped, cross_dropped
 
 
 # --------------------------------------------------------------------------
@@ -354,6 +449,7 @@ def run_demo(cfg: ScanConfig, backtest: bool, backtest_days: int,
         return rows
 
     signals = []
+    touches = []
     for sym, (dates, bars, expected) in universe.items():
         sig = detect_setup(bars, dates, cfg)
         if sig and sig.get("score", 0) < cfg.score_threshold:
@@ -367,12 +463,26 @@ def run_demo(cfg: ScanConfig, backtest: bool, backtest_days: int,
             mark = "  !! MISSED (should have flagged)"
         if sig or expected is not None:
             print(f"{sym:16s} expected={expected} got={sig['signal_date'] if sig else None}{mark}")
+        # ---- SSL-zone touch (early-warning) ----  # noqa: E501
+        if cfg.ssl_touch_alerts:
+            touch = detect_ssl_touch(bars, dates, cfg)
+            if touch:
+                # if the same bar is already a full reversal signal, the touch
+                # would be redundant (HEG-style: touch == reversal day)
+                if sig is not None and str(touch["signal_date"])[:10] \
+                        == str(sig["signal_date"])[:10]:
+                    touch = None
+                if touch:
+                    touches.append(touch)
     rows = _table_rows(sorted(signals, key=lambda s: -s["score"]))
     _print_table(rows)
+    _print_touches(touches)
 
     if notifier is not None:
         scope = f"demo ({len(universe)} symbols)"
         sent = notifier.send_signals(signals, scope)
+        if touches:
+            sent += notifier.send_ssl_touches(touches, scope)
         print(f"Telegram: {sent} messages sent ({scope})")
 
     return rows
@@ -386,7 +496,8 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
              watchlist: str | None, from_days: int, force_refresh: bool,
              debug: bool, intraday: bool = False,
              notifier: TelegramNotifier | None = None,
-             summary_sink: list[str] | None = None) -> list[dict]:
+             summary_sink: list[str] | None = None,
+             out_path: str | None = None) -> list[dict]:
     from universes import get_universe
 
     def _summary(line: str) -> None:
@@ -453,7 +564,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     # ---------------------------------------------------------------- scan
     import time as _t
     t0 = _t.time()
-    signals, errors = [], 0
+    signals, touches, errors = [], [], 0
     total = len(symbols)
     # the yfinance fallback is PACED process-wide: paced to avoid Yahoo 429s
     yf_gate = _YfGate(cfg.yf_min_interval, cfg.yf_retry_delay)
@@ -469,9 +580,9 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         return why[:24] or "other"
 
     def scan_one(sym: str):
-        """Fetch + detect for one symbol. Returns a 4-tuple
-        (sig, err, pref_skipped, near_miss) - EVERY path must return all
-        four or run_live's unpack crashes the whole scan.
+        """Fetch + detect for one symbol. Returns a 5-tuple
+        (sig, touch, err, pref_skipped, near_miss) - EVERY path must return
+        all five or run_live's unpack crashes the whole scan.
         PRIMARY = yfinance (paced); on any failure the paced yfinance fallback
         is used exclusively - no Dhan dependency.
         """
@@ -482,7 +593,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             # detector compares errors/total, and the 2026-08-28 lesson is
             # that a blind scanner must never look like a healthy quiet
             # day (0 errors, "no signals today").
-            return None, "NODATA: no bars from yfinance", False, None
+            return None, None, "NODATA: no bars from yfinance", False, None
 
         # ---- normalize dates to ISO (epoch-safe, cache-safe) ----
         bars["dates"] = [_iso_date(d) for d in bars["dates"]]
@@ -492,6 +603,12 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         bars["symbol"] = sym
 
         # ---- prefilter: weekly RSI/MACD + close>100 + green daily ----
+        #   This gates the REVERSAL PATTERN SIGNAL only. The SSL-zone TOUCH is an
+        #   EARLY-WARNING alert on the flush day: the candle is naturally RED and
+        #   a deep flush can drag weekly RSI/MACD down (e.g. JSFB's -14.5% flush),
+        #   so the touch BYPASSES the panel and relies entirely on the structural
+        #   detector's BOS / flush / SSL / price / volume gates (detect_ssl_touch).
+        pref_blocked = False
         if cfg.prefilter_enabled:
             ok, why = passes_prefilter(bars, cfg)
             if not ok:
@@ -502,7 +619,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                     with _pref_lock:
                         key = _pref_bucket(why)
                         _pref_reasons[key] = _pref_reasons.get(key, 0) + 1
-                return None, "", True, None
+                pref_blocked = True   # removed from the REVERSAL scan
 
         live_merged = False
         if intraday:
@@ -518,18 +635,33 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                         # whole scan - fall back to completed daily bars
                         live_merged = False
 
-        sig = detect_setup(bars, bars["dates"], cfg)
+        # ---- reversal detection (needs the full panel to pass) ----
+        sig = None
         near = None
-        if sig and sig.get("score", 0) < cfg.score_threshold:
-            # below the alert threshold -> not a signal, but remember the
-            # near-misses (score within 15 pts) so the daily summary can
-            # explain WHY a quiet day is quiet ("2 setups scored 62-69")
-            if sig["score"] >= cfg.score_threshold - 15:
-                near = (sym, sig["score"], str(sig["signal_date"])[:10])
-            sig = None
+        if not pref_blocked:
+            sig = detect_setup(bars, bars["dates"], cfg)
+            if sig and sig.get("score", 0) < cfg.score_threshold:
+                # below the alert threshold -> not a signal, but remember the
+                # near-misses (score within 15 pts) so the daily summary can
+                # explain WHY a quiet day is quiet ("2 setups scored 62-69")
+                if sig["score"] >= cfg.score_threshold - 15:
+                    near = (sym, sig["score"], str(sig["signal_date"])[:10])
+                sig = None
         if sig:
             sig["intraday"] = bool(live_merged)
-        return sig, "", False, near
+
+        # ---- SSL-zone TOUCH (early-warning add-on; runs even on a red flush
+        #      day, independent of the reversal signal) ----
+        touch = detect_ssl_touch(bars, bars["dates"], cfg) if cfg.ssl_touch_alerts \
+            else None
+        if touch and sig and str(touch["signal_date"])[:10] \
+                == str(sig["signal_date"])[:10]:
+            # the same bar is already a confirmed reversal (HEG-style touch ==
+            # reversal day): don't double-alert, the reversal message covers it
+            touch = None
+        if touch:
+            touch["intraday"] = bool(live_merged)
+        return sig, touch, "", pref_blocked, near
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     err_by_type: dict[str, int] = {}
@@ -541,7 +673,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
         for fut in as_completed(futs):
             done += 1
             sym = futs[fut]
-            sig, err, pref, near = fut.result()
+            sig, touch, err, pref, near = fut.result()
             if err:
                 errors += 1
                 key = err.split(":")[0].split("for url")[0].strip()[:60]
@@ -550,14 +682,20 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                     err_samples.append(f"[{sym}] {err[:150]}")
                 if debug:
                     print(f"  [{sym}] ERROR {err[:120]}")
-            elif pref:
-                pref_skipped += 1
             elif sig:
                 signals.append(sig)
                 tag = "LIVE " if sig.get("intraday") else ""
                 print(f"  SIGNAL {tag}{sym:12s} score={sig['score']:.0f} "
                       f"signal={sig['signal_date']} ssl={sig['ssl']:.1f} "
                       f"flush={sig['flush_date']}")
+            elif touch:
+                touches.append(touch)
+                tag = "LIVE " if touch.get("intraday") else ""
+                print(f"  TOUCH  {tag}{sym:12s} low={touch['flush_low']:.1f} "
+                      f"ssl={touch['ssl']:.1f} "
+                      f"date={touch['signal_date']}")
+            elif pref:
+                pref_skipped += 1
             if near is not None:
                 near_misses.append(near)
             if done % 100 == 0 or done == total:
@@ -565,15 +703,18 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                 rate = done / max(el, 1e-6)
                 eta = (total - done) / rate if rate > 0 else float("inf")
                 print(f"  ... {done}/{total} scanned "
-                      f"({len(signals)} signals, {errors} errors, "
+                      f"({len(signals)} signals, {len(touches)} touches, "
+                      f"{errors} errors, "
                       f"{pref_skipped} prefilter-skipped) "
                       f"[{el:.0f}s elapsed, {rate:.1f} sym/s, "
                       f"ETA {eta/60:.1f} min]", flush=True)
     import time as _t
-    print(f"scanned {total} symbols, {len(signals)} signals, {errors} errors, "
+    print(f"scanned {total} symbols, {len(signals)} signals, "
+          f"{len(touches)} touches, {errors} errors, "
           f"{pref_skipped} prefilter-skipped in {_t.time() - t0:.0f}s")
     _summary(f"scan: {total} scanned · {len(signals)} signals · "
-             f"{errors} errors · {pref_skipped} prefilter-skipped "
+             f"{len(touches)} touches · {errors} errors · "
+             f"{pref_skipped} prefilter-skipped "
              f"· score>= {cfg.score_threshold:.0f}")
     # ---- data-source health: yfinance fallback is FINE for daily bars ----
     # (a silently-stale token is no longer an issue since we no longer use Dhan)
@@ -610,7 +751,7 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
     LAST_RUN_STATS.clear()
     LAST_RUN_STATS.update({
         "total": total, "errors": errors, "signals": len(signals),
-        "pref_skipped": pref_skipped,
+        "touches": len(touches), "pref_skipped": pref_skipped,
         "outage": outage,
     })
     if errors and err_by_type:
@@ -621,51 +762,40 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             print(f"  e.g. {s}")
 
     # ---- cooldown: drop repeat signals for the same symbol within
-    #      cooldown_days (backtest: repeats win only 30% vs 63% first) ----
-    if cfg.cooldown_days > 0 and signals:
-        signals.sort(key=lambda s: (s["symbol"], str(s["signal_date"])[:10]))
-        deduped, last_by_sym = [], {}
-        for s in signals:
-            sym = s["symbol"]
-            date_s = str(s["signal_date"])[:10]
-            if sym in last_by_sym:
-                try:
-                    import datetime as _dt
-                    gap = (_dt.date.fromisoformat(date_s)
-                           - _dt.date.fromisoformat(last_by_sym[sym])).days
-                    if gap <= cfg.cooldown_days:
-                        continue
-                except ValueError:
-                    pass
-            last_by_sym[sym] = date_s
-            deduped.append(s)
-        dropped = len(signals) - len(deduped)
-        if dropped:
-            print(f"cooldown: dropped {dropped} repeat signals within "
-                  f"{cfg.cooldown_days}d")
-        signals = deduped
+    #      cooldown_days (backtest: repeats win only 30% vs 63% first). The
+    #      cross-run tracker-backed cooldown prevents the SAME setup re-alerting
+    #      on every run that still serves the same last bar (2026-08-19 saw 5
+    #      identical re-alerts of the 08-18 signal). Shared helper => identical
+    #      semantics for signals and touches, but SEPARATE tracker files so a
+    #      touch never suppresses the later reversal signal (and vice versa). ---
+    signals, dropped, cooldown_skipped = _apply_cooldowns(
+        signals, cfg.cooldown_days, cfg.tracker_file, cfg.tracker_enabled)
+    if dropped:
+        print(f"cooldown: dropped {dropped} repeat signals within "
+              f"{cfg.cooldown_days}d")
+    if cooldown_skipped:
+        print(f"cross-run cooldown: suppressed {cooldown_skipped} "
+              f"re-alert(s) (already alerted within {cfg.cooldown_days}d "
+              f"per {cfg.tracker_file})")
 
-    # ---- CROSS-RUN cooldown: the tracker sheet remembers every alert, so a
-    #      symbol alerted within cooldown_days does not re-alert on the NEXT
-    #      run (2026-08-19 saw 5 identical re-alerts of the 08-18 signal:
-    #      same setup, same last bar, no memory between runs) ----
-    cooldown_skipped = 0
-    if cfg.cooldown_days > 0 and cfg.tracker_enabled and signals:
-        kept = []
-        for s in signals:
-            try:
-                if recently_alerted(s["symbol"], str(s["signal_date"])[:10],
-                                    cfg.cooldown_days, cfg.tracker_file):
-                    cooldown_skipped += 1
-                    continue
-            except Exception:  # noqa: BLE001  (bad tracker file -> alert anyway)
-                pass
-            kept.append(s)
-        if cooldown_skipped:
-            print(f"cross-run cooldown: suppressed {cooldown_skipped} "
-                  f"re-alert(s) (already alerted within {cfg.cooldown_days}d "
-                  f"per {cfg.tracker_file})")
-        signals = kept
+    # ---- SSL-zone TOUCHES: their own cooldown/tracker (separate type) ----
+    touch_dropped = 0
+    touch_cooldown = 0
+    if cfg.ssl_touch_alerts and touches:
+        touches, touch_dropped, touch_cooldown = _apply_cooldowns(
+            touches, cfg.ssl_touch_cooldown_days,
+            cfg.ssl_touch_tracker_file, cfg.tracker_enabled)
+        if touch_dropped:
+            print(f"cooldown: dropped {touch_dropped} repeat touch(es) within "
+                  f"{cfg.ssl_touch_cooldown_days}d")
+        if touch_cooldown:
+            print(f"cross-run cooldown: suppressed {touch_cooldown} "
+                  f"re-alert touch(es) (already alerted within "
+                  f"{cfg.ssl_touch_cooldown_days}d per "
+                  f"{cfg.ssl_touch_tracker_file})")
+    # reflect the ACTUAL (post-cooldown) touch count in the run stats so the
+    # summary line and the Telegram stats don't overstate suppressed touches
+    LAST_RUN_STATS["touches"] = len(touches) if cfg.ssl_touch_alerts else 0
 
     if near_misses:
         near_misses.sort(key=lambda x: -x[1])
@@ -675,9 +805,12 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                                              for s, sc, _ in near_misses[:10]))
     if cooldown_skipped:
         _summary(f"cooldown: {cooldown_skipped} re-alert(s) suppressed")
+    if touch_cooldown:
+        _summary(f"cooldown: {touch_cooldown} re-alert touch(es) suppressed")
 
     rows = _table_rows(sorted(signals, key=lambda s: -s["score"]))
     _print_table(rows)
+    _print_touches(touches)
 
     # ---- tracking sheet: log new signals + mark OPEN rows HIT/MISS ----
     if cfg.tracker_enabled:
@@ -689,6 +822,21 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             print(f"WARNING: tracker update failed: {e}", file=sys.stderr)
         print(f"tracker: {added} new logged, {updated} OPEN -> HIT/MISS "
               f"({cfg.tracker_file})")
+        # touches land in their own tracker file (separate cooldown type) so
+        # they never suppress / pollute the reversal tracker
+        if cfg.ssl_touch_alerts and touches:
+            t_added = sum(1 for t in touches
+                          if log_signal(t, cfg.ssl_touch_tracker_file))
+            print(f"tracker: {t_added} new SSL-touch logged "
+                  f"({cfg.ssl_touch_tracker_file})")
+            # a touches CSV sidecar so a run that fired touches leaves
+            # verifiable evidence next to the signals CSV
+            if out_path:
+                try:
+                    _write_touches_csv(touches, out_path + ".touches.csv")
+                except OSError as e:  # noqa: BLE001
+                    print(f"WARNING: touches CSV write failed: {e}",
+                          file=sys.stderr)
 
     if notifier is not None:
         scope = f"{len(symbols)} symbols"
@@ -696,6 +844,9 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
                  f"· errors {errors}")
         if cooldown_skipped:
             stats += f" · {cooldown_skipped} re-alert(s) suppressed by cooldown"
+        if touch_cooldown:
+            stats += (f" · {touch_cooldown} re-alert touch(es) suppressed "
+                      f"by cooldown")
         if near_misses:
             stats += (" · near-misses (score < "
                       f"{cfg.score_threshold:.0f}): "
@@ -707,6 +858,8 @@ def run_live(cfg: ScanConfig, token: str, client_id: str | None, limit: int,
             sent += notifier.send_signals(signals, scope, stats)
         else:
             sent = notifier.send_signals(signals, scope, stats)
+        if cfg.ssl_touch_alerts and touches:
+            sent += notifier.send_ssl_touches(touches, scope, stats)
         print(f"Telegram: {sent} messages sent ({scope})")
 
     return rows
@@ -782,13 +935,16 @@ def main(argv=None) -> int:
         summary: list[str] = []
         rows = run_live(cfg, token, client_id, args.limit, args.watchlist,
                         args.from_days, args.refresh, args.debug,
-                        args.intraday, notifier, summary_sink=summary)
+                        args.intraday, notifier, summary_sink=summary,
+                        out_path=args.out)
         stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip()
         outage = bool(LAST_RUN_STATS.get("outage"))
+        touches_n = LAST_RUN_STATS.get("touches", 0)
         result = (f"result: 🛑 DATA OUTAGE - {LAST_RUN_STATS.get('errors', 0)}/"
                   f"{LAST_RUN_STATS.get('total', 0)} fetches failed; "
                   f"{len(rows)} signal(s) INVALID") if outage else \
-                 f"result: {len(rows)} signal(s)"
+                 (f"result: {len(rows)} signal(s)"
+                  + (f", {touches_n} SSL-touch(es)" if touches_n else ""))
         summary = [f"shakeout scan - {stamp} "
                    f"({'intraday' if args.intraday else 'eod'})"] + summary \
                   + [result]

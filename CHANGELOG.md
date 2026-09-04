@@ -3,6 +3,31 @@
 Notable changes to the shakeout scanner/backtest. Entries reference the PR that
 introduced them; dates are UTC.
 
+## 2026-09-04
+
+- **SSL-zone TOUCH alert (early-warning add-on).** The scanner now also alerts
+  the moment price dips INTO the sell-side liquidity (SSL) level — the "flush"
+  step — *before* the reversal candle confirms. The existing reversal
+  PATTERN SIGNAL is unchanged and still fires exactly as before.
+  - New `pattern.detect_ssl_touch()` detects the touch on the flush day itself
+    (the bar whose low first enters the SSL zone) and shares the
+    BOS / peak / flush / SSL anatomy with the reversal detector, without
+    requiring the green reversal candle.
+  - Distinct, lighter Telegram message (`SSL-ZONE TOUCH`) sent via
+    `TelegramNotifier.send_ssl_touches` / `format_ssl_touch` — no trade plan,
+    just the BOS / peak / flush / SSL level as a "watch this level" heads-up.
+  - **Separate cooldown & tracking** (`ssl_touch_tracker.csv`) so a touch never
+    suppresses the later reversal alert for the same stock (and vice versa) —
+    everything stays intact.
+  - Runs in both the daily EOD and the `--intraday` scans; the daily-green
+    prefilter is relaxed for the touch channel (the flush day is normally red)
+    while weekly RSI/MACD/close still gate the candidate universe.
+  - New config: `ssl_touch_alerts`, `ssl_touch_tracker_file`,
+    `ssl_touch_cooldown_days`; a `*.touches.csv` sidecar is written next to the
+    signals CSV when touches fire.
+  - `tests.py` gains coverage for the detector, the touch Telegram format, and
+    the independent touch cooldown.
+
 ## 2026-08-30
 
 - **#13 — Backtest parity: same data as the scanner (Dhan primary + yfinance fallback).**
